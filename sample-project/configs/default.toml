@@ -1,0 +1,17 @@
+[http]
+host = "0.0.0.0"
+port = 8000
+
+[common.tracing]
+level = "debug"
+with_target = false
+with_file = false
+with_color = true
+with_line_number = false
+
+[common.postgres]
+min_conn = 1
+max_conn = 10
+url = "postgres://postgres:postgres@localhost:5432/postgres"
+
+[bc_post]

@@ -1,0 +1,16 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web.workspace = true
+anyhow.workspace = true
+bagua.workspace = true
+chrono.workspace = true
+diesel-async.workspace = true
+http = "1.1.0"
+linkme.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

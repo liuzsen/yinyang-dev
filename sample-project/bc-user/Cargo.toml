@@ -1,0 +1,26 @@
+[package]
+name = "bc-user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-identity = "0.8.0"
+actix-session = { version = "0.10.1", features = ["redis-session"] }
+actix-web = "4.9.0"
+anyhow = "1.0.95"
+argon2 = { version = "0.5.3", features = ["std"] }
+diesel = { version = "2.2.6", features = ["postgres"] }
+diesel_migrations = { version = "2.2.0", features = ["postgres"] }
+email_address = "0.2.9"
+linkme = "0.3.31"
+nutype = "0.5.1"
+serde = { version = "1.0.217", features = ["derive"] }
+tracing = "0.1.41"
+
+[dependencies.bagua]
+path = "/home/sen/web-rearch/bagua-dev"
+package = "bagua-dev"
+features = ["flake-id", "diesel-postgres"]
+
+[dependencies.common]
+path = "../common"
