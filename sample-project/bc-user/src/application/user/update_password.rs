@@ -48,7 +48,10 @@ where
             old_password,
             new_password,
         } = params;
-        let mut user = ensure_exist!(self.repo.find(id).await?, Error::UserNotFound);
+        let mut user = ensure_exist!(
+            self.repo.find::<UserWithPassword, _>(id).await?,
+            Error::UserNotFound
+        );
         ensure_biz!(user
             .update_password(&old_password, new_password)
             .map_err(Error::UserError));

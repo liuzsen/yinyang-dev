@@ -15,6 +15,7 @@ fn main() -> Result<()> {
         for uc in ucs {
             dbg!(&uc.name);
             dbg!(&uc.path);
+            uc.used_entities(&workspace.host, &workspace.vfs)?;
         }
     }
 

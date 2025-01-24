@@ -4,7 +4,10 @@ use std::{
 };
 
 use anyhow::Context;
-use ra_ap_hir::{db::ExpandDatabase, Crate, HirFileId, Impl, Module, Name, Trait};
+use ra_ap_hir::{
+    db::{DefDatabase, ExpandDatabase, HirDatabase},
+    Crate, HasSource, HirDisplay, HirFileId, Impl, Module, Name, Semantics, Trait,
+};
 use ra_ap_ide::AnalysisHost;
 use ra_ap_ide_db::base_db::SourceDatabase;
 use ra_ap_load_cargo::LoadCargoConfig;
@@ -187,7 +190,7 @@ impl BoundedContext {
                     name: module.name(db).unwrap().as_str().to_string(),
                     path,
                     entities: Vec::new(),
-                    block: impl_def,
+                    impl_: impl_def,
                 });
             }
         }
@@ -218,7 +221,7 @@ pub struct UseCase {
     pub name: String,
     pub path: AbsPathBuf,
     pub entities: Vec<EntityInUseCase>,
-    pub block: Impl,
+    pub impl_: Impl,
 }
 
 impl UseCase {
@@ -228,25 +231,57 @@ impl UseCase {
         vfs: &Vfs,
     ) -> anyhow::Result<Vec<EntityInUseCase>> {
         let db = host.raw_database();
-        let file_id = vfs
-            .file_id(&VfsPath::new_real_path(self.path.to_string()))
-            .unwrap();
-        let source_file = db.parse(EditionedFileId::current_edition(file_id));
-
-        // 查找 SubsetLoader 类型参数
         let mut entities = Vec::new();
 
-        // 遍历语法树查找 SubsetLoader 模式
-        let syntax = source_file.syntax_node();
-        for node in syntax.descendants() {
-            if let Some(impl_block) = ra_ap_syntax::ast::Impl::cast(node.clone()) {
-                if impl_block.trait_().map_or(false, |t| {
-                    let path_str = t.syntax().text().to_string();
-                    dbg!(&path_str);
-                    // 检查是否是 bagua::UseCase 或 ::bagua::UseCase
-                    path_str == "bagua::UseCase" || path_str == "::bagua::UseCase"
-                }) {
-                    dbg!(&impl_block);
+        let semantics = Semantics::new(db);
+        let file_id = vfs
+            .file_id(&VfsPath::new_real_path(dbg!(self.path.to_string())))
+            .unwrap();
+        let file_id = EditionedFileId::current_edition(file_id);
+        let source_file = semantics.parse(file_id);
+        let impl_ = source_file
+            .syntax()
+            .children()
+            .find_map(|c| {
+                if let Some(impl_block) = ra_ap_syntax::ast::Impl::cast(c.clone()) {
+                    if impl_block.trait_().map_or(false, |t| {
+                        let path_str = t.syntax().text().to_string();
+                        dbg!(&path_str);
+                        // 检查是否是 bagua::UseCase 或 ::bagus::UseCase
+                        path_str == "UseCase" || path_str == "::bagua::UseCase"
+                    }) {
+                        return Some(impl_block);
+                    }
+                }
+                None
+            })
+            .unwrap();
+        let impl_ = semantics.to_impl_def(&impl_).unwrap();
+
+        // let impl_ = semantics.parse(semantics.hir_file_for(self.impl_).file_id().unwrap());
+        // 遍历 impl 块中的所有项
+        for item in impl_.items(db) {
+            if let ra_ap_hir::AssocItem::Function(function) = item {
+                if function.name(db).as_str() == "execute" {
+                    let source = function.source(db).unwrap();
+                    let body = source.value.body().unwrap();
+
+                    // 使用语义分析器获取语法节点
+                    for stmt in body.statements() {
+                        if let ra_ap_syntax::ast::Stmt::LetStmt(let_stmt) = stmt {
+                            if let Some(init) = let_stmt.initializer() {
+                                if let Some(ty) = semantics.type_of_expr(&init) {
+                                    let ty = dbg!(ty
+                                        .original
+                                        .display_source_code(db, From::from(impl_.module(db)), true)
+                                        .unwrap()
+                                        .to_string());
+                                    dbg!(init);
+                                    if ty == "User" {}
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
