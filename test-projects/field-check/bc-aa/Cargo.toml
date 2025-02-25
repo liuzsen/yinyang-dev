@@ -1,0 +1,13 @@
+[package]
+name = "bc-aa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web.workspace = true
+anyhow.workspace = true
+linkme.workspace = true
+serde.workspace = true
+tracing.workspace = true
+bagua.workspace = true
+common.workspace = true

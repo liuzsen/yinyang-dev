@@ -6,18 +6,19 @@ use std::{
 use anyhow::Context;
 use ra_ap_hir::{
     db::{DefDatabase, ExpandDatabase, HirDatabase},
-    Crate, HasSource, HirDisplay, HirFileId, Impl, Module, Name, Semantics, Trait,
+    Crate, HasSource, HirDisplay, HirFileId, Impl, Module, Name, Semantics, Trait, TypeInfo,
 };
-use ra_ap_ide::AnalysisHost;
-use ra_ap_ide_db::base_db::SourceDatabase;
+use ra_ap_ide::{AnalysisHost, RootDatabase};
+use ra_ap_ide_db::{base_db::SourceDatabase, defs::IdentClass};
 use ra_ap_load_cargo::LoadCargoConfig;
 use ra_ap_proc_macro_api::ProcMacroServer;
 use ra_ap_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, RustLibSource};
 use ra_ap_span::EditionedFileId;
-use ra_ap_syntax::{ast::HasName, AstNode};
-use ra_ap_vfs::{AbsPathBuf, FileId, Vfs, VfsPath};
+use ra_ap_syntax::{ast::{self, HasName}, syntax_editor::Element, AstNode};
+use ra_ap_vfs::{AbsPathBuf, AnchoredPath, FileId, Vfs, VfsPath};
 
 pub struct Workspace {
+    pub root_crate: Crate,
     pub host: AnalysisHost,
     pub vfs: Vfs,
     pub proc_macro: ProcMacroServer,
@@ -35,7 +36,25 @@ impl Workspace {
         let manifest = ProjectManifest::discover_single(&path)?;
 
         let now = Instant::now();
-        let mut workspace = ProjectWorkspace::load(manifest, &cargo_config, no_progress)?;
+        let mut workspace = ProjectWorkspace::load(manifest.clone(), &cargo_config, no_progress)?;
+
+        let root_krate_name = match &workspace.kind{
+            ra_ap_project_model::ProjectWorkspaceKind::Cargo { cargo, error, build_scripts, rustc, cargo_config_extra_env, set_test } => {
+                let crates = cargo.packages().collect::<Vec<_>>();
+                crates.iter().find_map(|k| {
+                    let krate = &cargo[*k];
+                    if krate.is_member && &krate.manifest == manifest.manifest_path() {
+                        Some(krate.name.clone())
+                    } else {
+                        None
+                    }
+                })
+            },
+            ra_ap_project_model::ProjectWorkspaceKind::Json(project_json) => todo!(),
+            ra_ap_project_model::ProjectWorkspaceKind::DetachedFile { file, cargo, cargo_config_extra_env, set_test } => todo!(),
+        };
+        let root_krate_name = root_krate_name.unwrap();
+
         println!("load workspace: {:?}", now.elapsed());
 
         let now = Instant::now();
@@ -57,9 +76,28 @@ impl Workspace {
         )?;
         println!("load workspace: {:?}", now.elapsed());
 
+        let now = Instant::now();
+        let crate_graph = db.crate_graph();
+        let root_krate = crate_graph.iter().find_map(|id| {
+            let krate = &crate_graph[id];
+            match &krate.origin {
+                ra_ap_base_db::CrateOrigin::Local { repo, name } => {
+                    let name = name.as_ref().map(|n| {n.as_str()});
+                    if name == Some(&root_krate_name) {
+                        Some(Crate::from(id))
+                    } else {
+                        None
+                    }
+                },
+                _ => {None}
+            }
+        }).unwrap();
+        println!("root krate found: {:?}", now.elapsed());
+
         let host = AnalysisHost::with_database(db);
 
         Ok(Workspace {
+            root_crate: root_krate,
             host,
             vfs,
             proc_macro: proc_macro.context("Failed to load proc macro server")?,
@@ -103,6 +141,41 @@ pub struct BoundedContext {
     pub name: String,
     pub path: AbsPathBuf,
     pub krate: Crate,
+}
+
+pub fn bagua_entity_trait(host: &AnalysisHost) -> anyhow::Result<Trait> {
+    let db = host.raw_database();
+    let graph = db.crate_graph();
+    let crates = graph.iter();
+
+    for krate_id in crates {
+        let krate = ra_ap_hir::Crate::from(krate_id);
+        let display_name = krate.display_name(db).unwrap();
+        if display_name.canonical_name().as_str().contains("bagua") {
+            let modules = krate.modules(db);
+
+            for module in modules {
+                if module
+                    .name(db)
+                    .map_or(false, |name| name.as_str() == "entity")
+                {
+                    let declarations = module.declarations(db);
+                    for declaration in declarations {
+                        match declaration {
+                            ra_ap_hir::ModuleDef::Trait(trait_) => {
+                                if trait_.name(db).as_str() == "Entity" {
+                                    return Ok(trait_);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("Bagua entity trait not found")
 }
 
 pub fn bagua_usecase_trait(host: &AnalysisHost) -> anyhow::Result<Trait> {
@@ -243,7 +316,7 @@ impl UseCase {
             .syntax()
             .children()
             .find_map(|c| {
-                if let Some(impl_block) = ra_ap_syntax::ast::Impl::cast(c.clone()) {
+                if let Some(impl_block) = ast::Impl::cast(c.clone()) {
                     if impl_block.trait_().map_or(false, |t| {
                         let path_str = t.syntax().text().to_string();
                         dbg!(&path_str);
@@ -260,6 +333,7 @@ impl UseCase {
 
         // let impl_ = semantics.parse(semantics.hir_file_for(self.impl_).file_id().unwrap());
         // 遍历 impl 块中的所有项
+        let entity_trait = bagua_entity_trait(host)?;
         for item in impl_.items(db) {
             if let ra_ap_hir::AssocItem::Function(function) = item {
                 if function.name(db).as_str() == "execute" {
@@ -268,16 +342,19 @@ impl UseCase {
 
                     // 使用语义分析器获取语法节点
                     for stmt in body.statements() {
-                        if let ra_ap_syntax::ast::Stmt::LetStmt(let_stmt) = stmt {
+                        if let ast::Stmt::LetStmt(let_stmt) = stmt {
+                            dbg!(&let_stmt.to_string());
+
                             if let Some(init) = let_stmt.initializer() {
                                 if let Some(ty) = semantics.type_of_expr(&init) {
-                                    let ty = dbg!(ty
-                                        .original
-                                        .display_source_code(db, From::from(impl_.module(db)), true)
-                                        .unwrap()
-                                        .to_string());
-                                    dbg!(init);
-                                    if ty == "User" {}
+                                    if is_entity(&ty, db, impl_.module(db)) {
+                                        if dbg!(ty.original.impls_trait(db, entity_trait, &[])) {}
+                                        if &self.path.to_string() == "/home/sen/web-rearch/yinyang-dev/sample-project/bc-user/src/application/user/update.rs" {
+                                            dbg!(&init);
+                                            
+                                            analyze_repository_find(&init, &semantics);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -287,6 +364,139 @@ impl UseCase {
         }
 
         Ok(entities)
+    }
+}
+
+fn repository_trait_def(semantics: &Semantics<'_, RootDatabase>, root_mod: Module) -> ra_ap_hir::Trait {
+    let db = semantics.db;
+    use ra_ap_base_db::FileLoader;
+    let id = root_mod.definition_source_file_id(db).file_id().unwrap().file_id();
+    let bagua = db.resolve_path(AnchoredPath {
+        anchor: id,
+        path: "::bagua::repository::Repository",
+    }).unwrap();
+    let file = db.parse(EditionedFileId::current_edition(bagua));   
+    let file = file.tree();
+    
+    let sema = Semantics::new(db);
+    let module = sema.to_def(&file).unwrap();
+    
+    let trait_ = module.declarations(db).into_iter().find_map(|d| {
+        if let ra_ap_hir::ModuleDef::Trait(trait_) = d {
+            if trait_.name(db).as_str() == "Repository" {
+                return Some(trait_);
+            }
+        }
+        None
+    }).unwrap();
+
+
+    trait_
+}
+
+fn analyze_repository_find(
+    expr: &ast::Expr,
+    semantics: &Semantics<'_, RootDatabase>,
+) -> Option<(String, String)> {
+    // (Entity name, Subset name)
+    // 1. 检查是否是方法调用
+    if let ast::Expr::MacroExpr(mac) = expr {
+        let call = mac.macro_call()?;
+        let tree = call.token_tree()?;
+        for c in tree.token_trees_and_tokens() {
+            match c {
+                ra_ap_syntax::NodeOrToken::Node(sub_tree) => {},
+                ra_ap_syntax::NodeOrToken::Token(token) => {
+                    let find_method_syn_node = semantics.descend_into_macros(token).into_iter().find_map(|token| {
+                        let p = token.parent()?;
+
+                        dbg!(&token);
+                        dbg!(p.to_string());
+                        dbg!(p.kind());
+                        println!("");
+                        
+                        if token.text() == "find" {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    });
+
+                    let Some(find_method_syn_node) = find_method_syn_node else {
+                        continue;
+                    };
+                    dbg!(&find_method_syn_node);
+
+                    let defs = IdentClass::classify_node(semantics, &find_method_syn_node)?.definitions();
+                    for def in defs {
+                        dbg!(&def); 
+                        let module = def.module(semantics.db).unwrap();
+                        dbg!(module.name(semantics.db));
+                        let krate = module.krate();
+                        dbg!(krate.display_name(semantics.db).unwrap());
+
+                        match def {
+                            ra_ap_ide_db::defs::Definition::Trait(t) => {
+
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    
+                    // let def = semantics.to_def(&find_method_node)?;
+                },
+            }
+        }
+    }
+
+    // if let Some(call) = expr
+    //     .syntax()
+    //     .descendants()
+    //     .find_map(|d| {
+    //         dbg!(&d);
+    //         dbg!(ra_ap_syntax::ast::CallExpr::cast(d))
+    //     })
+    // {
+    //     // 2. 检查调用的函数
+    //     if let Some(callee) = call.expr() {
+    //         if let Some(ty) = semantics.type_of_expr(&callee) {
+    //             dbg!(ty);
+    //             // let type_str = ty
+    //             //     .original
+    //             //     .display_source_code(db, ty.original.module(db), true)
+    //             //     .unwrap_or_default()
+    //             //     .to_string();
+
+    //             // // 3. 检查是否是 Repository::find
+    //             // if type_str.contains("Repository") {
+    //             //     // 4. 获取泛型参数
+    //             //     if let Some(generic_args) = call.generic_arg_list() {
+    //             //         dbg!(&generic_args.to_string()); // 显式泛型参数
+    //             //     }
+
+    //             //     // 5. 从返回类型推断 Entity 和 Subset
+    //             //     if let Some(ret_ty) = semantics.type_of_expr(expr) {
+    //             //         dbg!(&ret_ty); // 返回类型信息
+    //             //     }
+    //             // }
+    //         }
+    //     }
+    // }
+    None
+}
+
+fn is_entity(ty: &TypeInfo, db: &RootDatabase, module: Module) -> bool {
+    let ty_str = dbg!(ty
+        .original
+        .display_source_code(db, From::from(module), true)
+        .unwrap()
+        .to_string());
+    // for test
+    if ty_str == "User" {
+        true
+    } else {
+        false
     }
 }
 

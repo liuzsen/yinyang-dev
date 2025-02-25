@@ -1,0 +1,52 @@
+[package]
+name = "field-check"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["common", "bc-*"]
+
+[workspace.dependencies]
+common = { path = "./common" }
+anyhow = "1"
+actix-web = "4"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["chrono", "env-filter"] }
+config = "0.14"
+linkme = "0.3"
+tokio = { version = "1", features = ["full"] }
+indexmap = { version = "2", features = ["serde"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+diesel = { version = "2", features = ["postgres", "serde_json", "chrono"] }
+diesel-async = { version = "0.5", features = ["deadpool", "postgres"] }
+diesel_migrations = { version = "2", features = ["postgres"] }
+
+[workspace.dependencies.bagua]
+path = "/home/sen/framework-dev/bagua-dev2"
+package = "bagua-dev"
+features = ["flake-id", "diesel-postgres"]
+
+[dependencies]
+actix-web.workspace = true
+anyhow.workspace = true
+common.workspace = true
+config.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+bagua.workspace = true
+
+[dependencies.bc-aa]
+path = "./bc-aa"
+
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
+# Enable a large amount of optimization in the dev profile for dependencies.
+[profile.dev.package."*"]
+opt-level = 3
