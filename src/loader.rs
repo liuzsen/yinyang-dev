@@ -2,15 +2,15 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use ra_ap_base_db::SourceDatabase;
-use ra_ap_hir::{Crate, Impl, Module, Trait};
-use ra_ap_hir_def::resolver::HasResolver;
+use ra_ap_hir::{db::HirDatabase, AdtId, Crate, Enum, Function, Impl, Module, Struct, Trait, Type};
+use ra_ap_hir_def::resolver::{HasResolver, Resolver};
 use ra_ap_ide::{CrateId, RootDatabase};
 use ra_ap_load_cargo::LoadCargoConfig;
 use ra_ap_proc_macro_api::ProcMacroServer;
 use ra_ap_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, RustLibSource};
 use ra_ap_vfs::{AbsPathBuf, Vfs};
 
-use crate::{abs_path, crate_path, parse_find::GetId, timer_end, timer_start};
+use crate::{abs_path, crate_path, parse_find::GetId, timer_end, timer_start, Semantics};
 
 pub struct BaguaProject {
     pub db: RootDatabase,
@@ -24,9 +24,20 @@ pub struct BaguaProject {
 }
 
 pub struct Bagua {
-    pub entity_trait: Trait,
+    pub entity_trait: EntityTrait,
     pub usecase_trait: Trait,
+    pub repository_trait: RepositoryTrait,
+    pub trait_subset: Trait,
+
+    pub struct_field: Enum,
+    pub struct_foreign_entities: Enum,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct EntityTrait(pub Trait);
+
+#[derive(Debug, Clone, Copy)]
+pub struct RepositoryTrait(pub Trait);
 
 pub struct BoundedContext {
     pub krate: Crate,
@@ -34,6 +45,21 @@ pub struct BoundedContext {
 
 pub struct Usecase {
     pub module: Module,
+}
+
+impl RepositoryTrait {
+    pub fn method_find(&self, db: &RootDatabase) -> Option<Function> {
+        self.0.items(db).iter().find_map(|it| match it {
+            ra_ap_hir::AssocItem::Function(function) => {
+                if function.name(db).symbol().to_string() == "find" {
+                    Some(function.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+    }
 }
 
 impl BaguaProject {
@@ -163,6 +189,10 @@ impl BaguaProject {
 
         let uc_trait = usecase_trait(&db, root_krate)?;
         let entity_trait = entity_trait(&db, root_krate)?;
+        let repository_trait = repository_trait(&db, root_krate)?;
+        let struct_field = struct_field(&db, root_krate)?;
+        let struct_foreign_entities = struct_foreign_entities(&db, root_krate)?;
+        let trait_subset = trait_subset(&db, root_krate)?;
 
         let project = BaguaProject {
             db,
@@ -171,13 +201,44 @@ impl BaguaProject {
             root_crate: root_krate,
             bc_crates,
             bagua: Bagua {
-                entity_trait,
+                entity_trait: EntityTrait(entity_trait),
                 usecase_trait: uc_trait,
+                repository_trait: RepositoryTrait(repository_trait),
+                struct_field,
+                struct_foreign_entities,
+                trait_subset,
             },
         };
 
         Ok(project)
     }
+}
+
+fn trait_subset(db: &RootDatabase, krate: Crate) -> Result<Trait> {
+    let resolver = krate.root_module().id().resolver(db);
+    let path = abs_path!(bagua::entity::subset::Subset);
+    resolve_trait(db, &resolver, path)
+}
+
+fn struct_foreign_entities(db: &RootDatabase, krate: Crate) -> Result<Enum> {
+    let resolver = krate.root_module().id().resolver(db);
+    let path = abs_path!(bagua::entity::foreign::ForeignEntities);
+    resolve_enum(db, &resolver, path)
+}
+
+fn struct_field(db: &RootDatabase, krate: Crate) -> Result<Enum> {
+    let resolver = krate.root_module().id().resolver(db);
+    let path = abs_path!(bagua::entity::field::Field);
+    resolve_enum(db, &resolver, path)
+}
+
+fn repository_trait(db: &RootDatabase, krate: Crate) -> Result<Trait> {
+    let start = timer_start!();
+    let resolver = krate.root_module().id().resolver(db);
+    timer_end!(start, "resolve root module");
+
+    let path = abs_path!(bagua::repository::Repository);
+    resolve_trait(db, &resolver, path)
 }
 
 fn entity_trait(db: &RootDatabase, krate: Crate) -> Result<Trait> {
@@ -187,6 +248,27 @@ fn entity_trait(db: &RootDatabase, krate: Crate) -> Result<Trait> {
 
     let path = abs_path!(bagua::entity::Entity);
 
+    resolve_trait(db, &resolver, path)
+}
+
+fn resolve_enum(db: &RootDatabase, resolver: &Resolver, path: ra_ap_hir::ModPath) -> Result<Enum> {
+    let resolved = resolver.resolve_module_path_in_items(db, &path);
+    match resolved.take_types() {
+        Some(def) => match def {
+            ra_ap_hir::ModuleDefId::AdtId(AdtId::EnumId(enum_id)) => Ok(Enum::from(enum_id)),
+            _ => {
+                anyhow::bail!("Could not find struct {:?}", path)
+            }
+        },
+        None => anyhow::bail!("Could not find struct {:?}", path),
+    }
+}
+
+fn resolve_trait(
+    db: &RootDatabase,
+    resolver: &Resolver,
+    path: ra_ap_hir::ModPath,
+) -> Result<Trait> {
     let resolved = resolver.resolve_module_path_in_items(db, &path);
     match resolved.take_types() {
         Some(def) => match def {
@@ -195,7 +277,7 @@ fn entity_trait(db: &RootDatabase, krate: Crate) -> Result<Trait> {
                 anyhow::bail!("")
             }
         },
-        None => anyhow::bail!("Could not find trait Entity"),
+        None => anyhow::bail!("Could not find trait {:?}", path),
     }
 }
 
@@ -277,4 +359,19 @@ fn is_use_case(impl_: ra_ap_hir::Impl, db: &RootDatabase) -> bool {
         }
     }
     false
+}
+
+impl Usecase {
+    pub fn debug_print(&self, db: &RootDatabase) {
+        let sema = Semantics::new(db);
+        let source = self.module.as_source_file_id(db).unwrap();
+        let file = sema.parse(source);
+        dbg!(&file);
+    }
+}
+
+impl Bagua {
+    pub fn impls_subset(&self, db: &RootDatabase, ty: &Type) -> bool {
+        ty.impls_trait(db, self.trait_subset, &[])
+    }
 }

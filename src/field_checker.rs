@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use ra_ap_base_db::SourceDatabase;
-use ra_ap_hir::{Adt, HasSource, ModuleDef, Semantics};
+use ra_ap_hir::{Adt, HasSource, HirDisplay, ModuleDef};
 use ra_ap_hir_def::hir;
 use ra_ap_hir_expand::builtin::quote::ToTokenTree;
-use ra_ap_ide::RootDatabase;
 use ra_ap_ide_db::{defs::NameClass, LineIndexDatabase};
 use ra_ap_syntax::{
     ast::{self, HasArgList, HasGenericArgs, HasName},
@@ -13,6 +12,7 @@ use ra_ap_syntax::{
 use crate::{
     entity::{Entity, FieldPath, Subset, SubsetField},
     loader::{BaguaProject, Usecase},
+    Semantics,
 };
 
 pub struct FieldChecker {
@@ -62,10 +62,12 @@ impl FieldChecker {
         let file_id = uc
             .module
             .as_source_file_id(db)
-            .context("uc modult has no file id ")?;
+            .context("uc module has no file id ")?;
         let mod_syn = UcFileSyn(sema.parse(file_id));
+        // dbg!(&mod_syn.0);
         let uc_impl = mod_syn.uc_impl()?;
         let exec_fn = uc_impl.execute_fn()?;
+        // exec_fn.entity_local_defs(&sema)
 
         let line_index = db.line_index(file_id.file_id());
         let mod_path = self.project.vfs.file_path(file_id.file_id());
@@ -176,15 +178,12 @@ impl UcImpl {
 }
 
 impl UcExecuteFn {
-    fn entity_local_defs(&self, sema: &Semantics<RootDatabase>) -> Result<Vec<EntityLocalDef>> {
+    fn entity_local_defs(&self, sema: &Semantics) -> Result<Vec<EntityLocalDef>> {
         let defs = self.entity_local_defs_inner(sema)?.unwrap_or_default();
         Ok(defs)
     }
 
-    fn entity_local_defs_inner(
-        &self,
-        sema: &Semantics<RootDatabase>,
-    ) -> Result<Option<Vec<EntityLocalDef>>> {
+    fn entity_local_defs_inner(&self, sema: &Semantics) -> Result<Option<Vec<EntityLocalDef>>> {
         let let_stmts = self
             .0
             .body()
@@ -223,10 +222,7 @@ impl UcExecuteFn {
     }
 }
 
-fn subset_struct_in_macro_call(
-    sema: &Semantics<RootDatabase>,
-    macro_expr: ast::MacroExpr,
-) -> Option<Subset> {
+fn subset_struct_in_macro_call(sema: &Semantics, macro_expr: ast::MacroExpr) -> Option<Subset> {
     let call = macro_expr.macro_call().unwrap();
     let expanded = expand_macro_recur(&sema, &call).unwrap();
     let find_method_call = expanded.descendants().find_map(|x| {
@@ -264,12 +260,12 @@ fn subset_struct_in_macro_call(
         let fields = fields.fields();
         for field in fields {
             let name = field.name()?.text().to_string();
-            let path = FieldPath {
-                qualifier: None,
-                name,
-            };
-            let subset_field = SubsetField { path };
-            subset_fields.push(subset_field);
+            // let path = FieldPath {
+            //     qualifier: None,
+            //     name,
+            // };
+            // let subset_field = SubsetField { path };
+            // subset_fields.push(subset_field);
         }
     }
 
@@ -304,7 +300,7 @@ impl EntityLocalDef {
             .unwrap()
     }
 
-    fn usages(&self, sema: &Semantics<RootDatabase>) -> Vec<EntityVariantUsage> {
+    fn usages(&self, sema: &Semantics) -> Vec<EntityVariantUsage> {
         let mut local_usages = Vec::new();
         if let NameClass::Definition(def) = NameClass::classify(sema, &self.def).unwrap() {
             let usages = def.usages(sema).all();
@@ -339,10 +335,11 @@ impl EntityVariantUsage {
         match self {
             EntityVariantUsage::FieldAccess(field_expr) => {
                 let name = field_expr.name_ref()?;
-                Some(FieldPath {
-                    qualifier: None,
-                    name: name.text().to_string(),
-                })
+                todo!()
+                // Some(FieldPath {
+                //     qualifier: None,
+                //     name: name.text().to_string(),
+                // })
             }
             EntityVariantUsage::MethodCall(_) => None,
         }
@@ -356,19 +353,16 @@ impl EntityVariantUsage {
     }
 }
 
-fn expand_macro_recur(
-    sema: &Semantics<'_, RootDatabase>,
-    macro_call: &ast::MacroCall,
-) -> Option<SyntaxNode> {
+fn expand_macro_recur(sema: &Semantics, macro_call: &ast::MacroCall) -> Option<SyntaxNode> {
     let expanded = sema.expand(macro_call)?.clone_for_update();
     expand(sema, expanded, ast::MacroCall::cast, expand_macro_recur)
 }
 
 fn expand<T: AstNode>(
-    sema: &Semantics<'_, RootDatabase>,
+    sema: &Semantics,
     expanded: SyntaxNode,
     f: impl FnMut(SyntaxNode) -> Option<T>,
-    exp: impl Fn(&Semantics<'_, RootDatabase>, &T) -> Option<SyntaxNode>,
+    exp: impl Fn(&Semantics, &T) -> Option<SyntaxNode>,
 ) -> Option<SyntaxNode> {
     let children = expanded.descendants().filter_map(f);
     let mut replacements = Vec::new();
@@ -388,4 +382,121 @@ fn expand<T: AstNode>(
         .rev()
         .for_each(|(old, new)| ted::replace(old.syntax(), new));
     Some(expanded)
+}
+
+#[derive(Debug, Clone)]
+pub struct UseCaseImpl(ast::Impl);
+
+pub struct UseCaseImplExecuteFn {
+    fn_: ast::Fn,
+    impl_: UseCaseImpl,
+}
+
+impl UseCaseImpl {
+    fn execute_fn(&self) -> UseCaseImplExecuteFn {
+        UseCaseImplExecuteFn {
+            fn_: self
+                .0
+                .assoc_item_list()
+                .unwrap()
+                .assoc_items()
+                .find_map(|item| {
+                    let method = ast::Fn::cast(item.syntax().clone())?;
+                    if method.name()?.text() == "execute" {
+                        return Some(method);
+                    }
+                    None
+                })
+                .unwrap(),
+            impl_: self.clone(),
+        }
+    }
+}
+
+impl UseCaseImplExecuteFn {
+    fn entity_local_defs(&self, sema: &Semantics) -> Vec<EntityLocalDef> {
+        for stmt in self.fn_.body().unwrap().statements() {
+            if let ast::Stmt::LetStmt(let_stmt) = stmt {
+                let pat = let_stmt.pat().unwrap();
+                let expr = let_stmt.initializer().unwrap();
+                if self.is_find_method_call(&expr) {
+                    match pat {
+                        ast::Pat::TupleStructPat(tuple_struct_pat) => {
+                            self.tuple_struct_pat_local_def(sema, &tuple_struct_pat);
+                        }
+                        ast::Pat::IdentPat(ident_pat) => {}
+                        _ => {}
+                    }
+                }
+            }
+        }
+        vec![]
+    }
+
+    fn tuple_struct_pat_local_def(
+        &self,
+        sema: &Semantics,
+        pat: &ast::TupleStructPat,
+    ) -> Option<EntityLocalDef> {
+        let ident_pat = pat.fields().next()?.get_ident_pat()?;
+        let ty = sema.type_of_binding_in_pat(&ident_pat)?;
+        let display = ty.display(sema.db, ra_ap_ide::Edition::Edition2021);
+        println!("{}", display);
+
+        // let ty = ty.as_adt()?;
+        // match ty {
+        //     Adt::Struct(struct_) => {}
+        //     Adt::Union(union) => todo!(),
+        //     Adt::Enum(_) => todo!(),
+        // }
+
+        None
+    }
+
+    fn is_find_method_call(&self, expr: &ast::Expr) -> bool {
+        true
+    }
+}
+
+trait PatHelper {
+    fn get_ident_pat(&self) -> Option<ast::IdentPat>;
+}
+
+impl PatHelper for ast::Pat {
+    fn get_ident_pat(&self) -> Option<ast::IdentPat> {
+        self.syntax().descendants().find_map(ast::IdentPat::cast)
+    }
+}
+
+impl FieldChecker {
+    fn find_entity_load_points(&self, sema: &Semantics, uc: &UseCaseImpl) -> Vec<EntityLocalDef> {
+        let execute_fn = uc.execute_fn();
+
+        todo!()
+    }
+
+    fn is_entity_load_point(&self, expr: &ast::Expr, sema: &Semantics) -> bool {
+        if let ast::Expr::MethodCallExpr(method_call) = expr {
+            Self::is_repository_find_method(sema, method_call)
+        } else {
+            false
+        }
+    }
+
+    fn is_repository_find_method(sema: &Semantics, expr: &ast::MethodCallExpr) -> bool {
+        let check = || -> Option<bool> {
+            if expr.name_ref()?.text() != "find" {
+                return Some(false);
+            }
+
+            Some(false)
+        };
+
+        check().unwrap_or(false)
+    }
+}
+
+enum EntityFindExpr {
+    MethodCall(ast::MethodCallExpr),
+    CallExpr(ast::CallExpr),
 }

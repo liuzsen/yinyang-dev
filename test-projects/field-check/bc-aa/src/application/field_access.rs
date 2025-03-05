@@ -47,51 +47,16 @@ where
         let Input { id } = params;
 
         let aa: Option<AA> = self.repo.find(id).await?;
-        let Some(aa) = aa else {
+        let name_opt = aa.as_ref().map(|aa| &*aa.name);
+
+        let Some(mut aa) = aa else {
             return biz_err!(Error::AANotFound);
         };
 
-        let mut bb = aa;
-        let cc = &mut bb;
+        access(&mut aa);
 
-        let _aa = Repository::find::<AAWithOnlyId, AAId>(&mut self.repo, id).await?;
-        let _bb = Repository::find(&mut self.repo, id).await?;
-
-        let mut aa: AA = ensure_exist!(
-            Repository::find::<AAWithOnlyId, AAId>(&mut self.repo, id).await?,
-            Error::AANotFound
-        );
-        let AAReadOnly {
-            id: _,
-            name,
-            foreigns,
-            group,
-            ..
-        } = aa.read_only();
-
-        do_something_infallible(&mut self.repo, id).await;
-        let repo = &mut self.repo;
-        do_something_infallible(repo, id).await;
-
-        biz_ok!(Output {})
+        todo!()
     }
-}
-
-async fn do_something_infallible<A>(a: &mut A, id: AAId)
-where
-    A: Repository<AA>,
-    A: SubsetLoader<AAWithOnlyId>,
-{
-    let b = a;
-    let c = b;
-    let _aa = Repository::find(c, id).await;
-    if let Ok(Some(aa)) = _aa {
-        let _: &MyString = &aa.name;
-    }
-}
-
-async fn aab() -> anyhow::Result<Option<u8>> {
-    todo!()
 }
 
 fn access(aa: &mut AA) {

@@ -24,3 +24,16 @@ async fn init(settings: &settings::Settings) -> anyhow::Result<()> {
 
     Ok(())
 }
+macro_rules! aa {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+fn aa() {
+    aa! {
+        let a = 1;
+    }
+
+    let b = a;
+}

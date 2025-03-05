@@ -21,15 +21,22 @@ pub enum EnitityFieldKind {
     FieldGroup { fields: Vec<EntityField> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct FieldPath {
-    pub qualifier: Option<Box<FieldPath>>,
-    pub name: String,
+    segments: Vec<String>,
 }
 
-impl PartialEq for FieldPath {
-    fn eq(&self, other: &Self) -> bool {
-        self.qualifier == other.qualifier && self.name == other.name
+impl FieldPath {
+    pub fn new_scalar(name: String) -> Self {
+        Self {
+            segments: vec![name],
+        }
+    }
+
+    pub fn join(&self, other: &Self) -> Self {
+        let mut segments = self.segments.clone();
+        segments.extend(other.segments.clone());
+        Self { segments }
     }
 }
 
