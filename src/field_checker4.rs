@@ -67,7 +67,9 @@ impl<'a> FieldChecker<'a> {
         for bc in &self.project.bc_crates {
             let ucs = bc.use_cases(&self.project.db);
             for uc in ucs {
-                self.check_uc(&uc)?;
+                let sema = Semantics::new(&self.project.db);
+                play_fn_access(&sema, &uc);
+                // self.check_uc(&uc)?;
                 // uc.debug_print(&self.project.db);
             }
         }
@@ -460,4 +462,433 @@ impl EntityBinding {
 struct EntityFindStmt {
     stmt: ast::Stmt,
     subset: Struct,
+}
+
+struct FieldAccessTrace {}
+
+impl EntityLocalVar {}
+
+fn play_fn_access(sema: &Semantics, uc: &Usecase) {
+    let file_id = uc
+        .module
+        .as_source_file_id(sema.db)
+        .context("uc module not found")
+        .unwrap();
+    let file_ast = sema.parse(file_id);
+    let fn_ = file_ast
+        .syntax()
+        .children()
+        .find_map(ast::Fn::cast)
+        .unwrap();
+
+    play_fn(sema, fn_);
+}
+
+fn play_fn(sema: &Semantics, fn_: ast::Fn) -> Option<()> {
+    dbg!(&fn_);
+    // let aa_arg = fn_.param_list()?.params().next().unwrap();
+    // let bind = aa_arg
+    //     .pat()
+    //     .unwrap()
+    //     .syntax()
+    //     .descendants()
+    //     .find_map(ast::IdentPat::cast)?;
+    // let usages = helper::usages_in_current_file(sema, &bind.name()?)?;
+    let stmts = fn_.body()?.statements();
+    for stmt in stmts {
+        dbg!(stmt.syntax().text());
+        let exprs = stmt.syntax().descendants().filter_map(ast::Expr::cast);
+        for expr_ast in exprs {
+            let expr_ty = sema.type_of_expr(&ast::Expr::from(expr_ast.clone()))?;
+            dbg!(expr_ast.syntax().text());
+            dbg!(&expr_ast);
+            dbg!(&expr_ty);
+            println!("");
+        }
+
+        println!("==================================================")
+    }
+    // for (_, usages) in usages {
+    //     for usage in usages {
+    //         let name_ref = usage.name.as_name_ref().unwrap();
+    //         let stmt = name_ref.syntax().ancestors().find_map(ast::Stmt::cast)?;
+    //         dbg!(stmt.syntax().text());
+    //         let exprs = stmt.syntax().descendants().filter_map(ast::Expr::cast);
+    //         for expr_ast in exprs {
+    //             let expr_ty = sema.type_of_expr(&ast::Expr::from(expr_ast.clone()))?;
+    //             dbg!(expr_ast.syntax().text());
+    //             dbg!(&expr_ast);
+    //             dbg!(&expr_ty);
+    //             println!("");
+    //         }
+
+    //         // let expr = name_ref
+    //         //     .syntax()
+    //         //     .ancestors()
+    //         //     .find_map(ast::FieldExpr::cast)?;
+    //         // let expr_ty = sema.type_of_expr(&ast::Expr::from(expr.clone()))?;
+    //         // dbg!(&expr);
+    //         // dbg!(&expr_ty);
+
+    //         // let Some(ref_expr) = expr.syntax().ancestors().find_map(ast::RefExpr::cast) else {
+    //         //     continue;
+    //         // };
+    //         // let ref_expr_ty = sema.type_of_expr(&ast::Expr::from(ref_expr.clone()))?;
+    //         // dbg!(&ref_expr);
+    //         // dbg!(&ref_expr_ty);
+
+    //         println!("-----------------")
+    //     }
+    // }
+
+    None
+}
+
+// pub enum EntityUsageKind {
+//     ScalarField(EntityFieldErxpr),
+//     GroupFieldExpr(Box<EntityUsageKind>),
+// }
+
+// pub enum EntityFieldExpr {
+//     Ref,
+//     MethodCall,
+//     Arg,
+// }
+
+mod aa {
+    use std::{collections::HashMap, sync::Arc};
+
+    use ra_ap_syntax::{ast, SmolStr};
+
+    use crate::entity::FieldPath;
+
+    pub struct FieldGroup {
+        fields: Arc<HashMap<String, Field>>,
+    }
+
+    pub enum VirtualFieldGroup {
+        Struct { fields: Arc<HashMap<String, Field>> },
+        Enum {},
+    }
+
+    pub enum Field {
+        AlwaysLoaded,
+        ScalarField,
+        GroupField(Box<FieldGroup>),
+    }
+
+    pub enum FieldAccessExpr {
+        // `entity.name` in `entity.name.len()`
+        FieldExpr(ast::FieldExpr),
+        // `&entity.name` in `let _: &MyString = &entity.name;`
+        // `&entity.group.g1` in `let _: &MyString = &entity.group.g1;`
+        // `&(&entity.name)` in `let _: &MyString = &(&entity.name);`
+        RefFieldExpr(ast::RefExpr),
+        // `*(&entity.name)` in `let _: &MyString = &(&entity.name);`
+        // `*bb.group.g1` in `let bb_g1: u32 = *bb.group.g1;`
+        DerefFieldExpr(ast::FieldExpr),
+    }
+
+    pub enum FieldReassign {
+        LetBind(ast::Pat, ast::Expr),
+        MethodCallArg(ast::CallExpr, ast::Expr),
+    }
+
+    pub enum EntityFieldTraceKind {
+        FieldAccess(FieldAccessExpr),
+        FieldReassign(FieldReassign),
+    }
+
+    pub struct FieldAccessNode {
+        kind: EntityFieldTraceKind,
+    }
+
+    pub struct FieldAccessChain {
+        nodes: Vec<FieldAccessNode>,
+        field_path: FieldPath,
+    }
+    pub struct FieldGroupAccessNode {}
+
+    fn aa() {}
+}
+
+mod bb {
+    use std::{collections::HashMap, sync::Arc};
+
+    use ra_ap_hir::TypeInfo;
+    use ra_ap_syntax::{
+        ast::{self, HasName, NameRef},
+        match_ast, AstNode, SyntaxKind,
+    };
+
+    use crate::{entity::FieldPath, helper, Semantics};
+
+    pub enum FieldAccessExpr {
+        // `entity.name` in `entity.name.len()`
+        FieldExpr(ast::FieldExpr),
+        // `&entity.name` in `let _: &MyString = &entity.name;`
+        // `&entity.group.g1` in `let _: &MyString = &entity.group.g1;`
+        // `&(&entity.name)` in `let _: &MyString = &(&entity.name);`
+        RefFieldExpr(ast::RefExpr),
+        // `*(&entity.name)` in `let _: &MyString = &(&entity.name);`
+        // `*bb.group.g1` in `let bb_g1: u32 = *bb.group.g1;`
+        DerefFieldExpr(ast::PrefixExpr),
+    }
+
+    pub enum Rebind {
+        LetBind(ast::Pat),
+        MethodArg(ast::Pat),
+        ReturnValue(ast::Expr),
+        StructRecord(ast::NameRef),
+    }
+
+    pub enum FieldAccessNode {
+        FieldAccess(FieldAccessExpr),
+        Rebind(Rebind),
+        GroupSelf(ast::Expr),
+        GroupSelfRef(ast::RefExpr),
+    }
+
+    pub struct FieldAccessChain {
+        nodes: Vec<FieldAccessNode>,
+        scalar_deref: EntityFieldDerefAccess,
+        field_path: FieldPath,
+    }
+
+    pub enum FieldType {
+        Scalar,
+        Group,
+    }
+
+    impl FieldAccessChain {
+        fn track(sema: &Semantics, def: super::EntityLocalVar) -> Vec<Self> {
+            let usages =
+                helper::usages_in_current_file(sema, &def.local_bind.pat.name().unwrap()).unwrap();
+
+            for (_, usages) in usages {
+                for usage in usages {
+                    let name_ref = usage.name.as_name_ref().unwrap();
+                    todo!()
+                }
+            }
+            todo!()
+        }
+
+        fn field_group_usage(
+            sema: &Semantics,
+            ref_expr: &ast::PathExpr,
+            group: &FieldGroup,
+        ) -> Option<FieldAccessNode> {
+            let parent = ref_expr.syntax().parent()?;
+            if ast::FieldExpr::can_cast(parent.kind()) {
+                let parent = ast::FieldExpr::cast(parent).unwrap();
+                let field_name = parent.name_ref()?;
+                let field = group.fields.get(field_name.ident_token()?.text()).unwrap();
+                match field {
+                    Field::AlwaysLoaded => {}
+                    Field::ScalarField => {}
+                    Field::GroupField(field_group) => todo!(),
+                }
+
+                todo!()
+            }
+
+            // let exprs = name_ref
+            //     .syntax()
+            //     .ancestors()
+            //     .take_while(|n| !ast::Stmt::can_cast(n.kind()))
+            //     .find_map(ast::Expr::cast);
+
+            todo!()
+        }
+
+        fn scalar_access(sema: &Semantics, expr: ast::FieldExpr) -> Option<EntityFieldDerefAccess> {
+            if is_field_deref(sema, expr.clone()) {
+                todo!()
+                // return Some(EntityFieldDerefAccess::new(expr));
+            }
+
+            let exprs = expr
+                .syntax()
+                .ancestors()
+                .skip(1)
+                .take_while(|n| ScalarFieldDeRef::can_cast(n.kind()))
+                .filter_map(|n| ScalarFieldDeRef::cast(n))
+                .collect::<Vec<_>>();
+            let outter_expr = exprs.last().cloned()?;
+
+            for expr in exprs {
+                if is_field_deref(sema, expr) {
+                    todo!()
+                }
+            }
+            let parent = outter_expr.syntax().parent()?;
+            match parent.kind() {
+                SyntaxKind::LET_STMT => {
+                    let parent = ast::LetStmt::cast(parent).unwrap();
+                    let pat = parent.pat();
+                }
+                SyntaxKind::METHOD_CALL_EXPR => {
+                    let parent = ast::MethodCallExpr::cast(parent).unwrap();
+                    sema.resolve_method_call(&parent);
+                }
+                SyntaxKind::ARG_LIST => {
+                    let arg_list = ast::ArgList::cast(parent).unwrap();
+                    let call_expr = ast::CallExpr::cast(arg_list.syntax().parent()?);
+                }
+                _ => {}
+            }
+
+            todo!()
+        }
+    }
+
+    enum ScalarAssign {
+        LetBind(ast::LetStmt),
+        MethodCall(ast::MethodCallExpr),
+        CallExpr(ast::CallExpr),
+    }
+
+    impl ScalarAssign {
+        fn track_trace(self, sema: &Semantics) -> Option<Vec<FieldAccessNode>> {
+            todo!()
+        }
+    }
+
+    #[derive(Clone)]
+    enum ScalarFieldDeRef {
+        Ref(ast::RefExpr),
+        Deref(ast::PrefixExpr),
+    }
+
+    impl From<ScalarFieldDeRef> for ast::Expr {
+        fn from(value: ScalarFieldDeRef) -> Self {
+            match value {
+                ScalarFieldDeRef::Ref(ref_expr) => todo!(),
+                ScalarFieldDeRef::Deref(prefix_expr) => todo!(),
+            }
+        }
+    }
+
+    impl AstNode for ScalarFieldDeRef {
+        fn can_cast(kind: ra_ap_syntax::SyntaxKind) -> bool
+        where
+            Self: Sized,
+        {
+            match kind {
+                ra_ap_syntax::SyntaxKind::REF_EXPR => true,
+                ra_ap_syntax::SyntaxKind::PREFIX_EXPR => true,
+                _ => false,
+            }
+        }
+
+        fn cast(syntax: ra_ap_syntax::SyntaxNode) -> Option<Self>
+        where
+            Self: Sized,
+        {
+            match syntax.kind() {
+                ra_ap_syntax::SyntaxKind::REF_EXPR => {
+                    Some(Self::Ref(ast::RefExpr::cast(syntax).unwrap()))
+                }
+                ra_ap_syntax::SyntaxKind::PREFIX_EXPR => {
+                    Some(Self::Deref(ast::PrefixExpr::cast(syntax).unwrap()))
+                }
+                _ => None,
+            }
+        }
+
+        fn syntax(&self) -> &ra_ap_syntax::SyntaxNode {
+            match self {
+                ScalarFieldDeRef::Ref(ref_expr) => ref_expr.syntax(),
+                ScalarFieldDeRef::Deref(prefix_expr) => prefix_expr.syntax(),
+            }
+        }
+    }
+
+    struct AccessStmt {
+        pat: Option<ast::Pat>,
+        exprs: Vec<ast::Expr>,
+    }
+
+    impl AccessStmt {
+        fn new(inner_expr: ast::Expr) -> Self {
+            let mut ancestors = inner_expr.syntax().ancestors();
+            let mut exprs = vec![];
+            let mut pat = None;
+            while let Some(ancestor) = ancestors.next() {
+                if ast::Expr::can_cast(ancestor.kind()) {
+                    exprs.push(ast::Expr::cast(ancestor).unwrap());
+                } else if ast::Stmt::can_cast(ancestor.kind()) {
+                    let stmt = ast::Stmt::cast(ancestor).unwrap();
+                    if let ast::Stmt::LetStmt(let_stmt) = stmt {
+                        pat = let_stmt.pat();
+                    }
+                    break;
+                } else {
+                    break;
+                }
+            }
+
+            Self { pat, exprs }
+        }
+    }
+
+    struct EntityFieldDerefAccess(ast::Expr);
+
+    impl EntityFieldDerefAccess {
+        fn new<T>(expr: T) -> Self
+        where
+            ast::Expr: From<T>,
+        {
+            todo!()
+        }
+    }
+
+    fn is_field_deref<T>(sema: &Semantics, expr: T) -> bool
+    where
+        ast::Expr: From<T>,
+    {
+        todo!()
+    }
+
+    pub struct FieldGroup {
+        fields: Arc<HashMap<String, Field>>,
+    }
+
+    pub enum Field {
+        AlwaysLoaded,
+        ScalarField,
+        GroupField(Box<FieldGroup>),
+    }
+}
+
+mod cc {
+    use std::{collections::HashMap, sync::Arc};
+
+    use ra_ap_syntax::ast;
+
+    use crate::entity::FieldPath;
+
+    pub enum TraceNode {
+        FieldExpr(ast::FieldExpr),
+        RefFieldExpr(ast::RefExpr),
+        StarDeref(ast::PrefixExpr),
+        PassSelf(ast::NameRef),
+        Bind(ast::Pat),
+    }
+
+    pub struct AccessTrace {
+        nodes: Vec<TraceNode>,
+        field_path: FieldPath,
+    }
+
+    pub struct FieldGroup {
+        fields: Arc<HashMap<String, Field>>,
+    }
+
+    pub enum Field {
+        AlwaysLoaded,
+        ScalarField,
+        GroupField(Box<FieldGroup>),
+    }
 }

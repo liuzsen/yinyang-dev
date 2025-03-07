@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use bagua::{
     biz_err, biz_ok, ensure_exist,
+    entity::field::Field,
     repository::{Repository, SubsetLoader},
     usecase::UseCase,
     Provider,
@@ -59,20 +60,62 @@ where
     }
 }
 
-fn access(aa: &mut AA) {
-    let _: &MyString = &aa.name; // panic
-    let _: usize = aa.name.len(); // panic
-    let _: usize = aa.name.inner.len(); // panic
-    let _: &u32 = &aa.group.g1; // panic
-    let _: &HashSet<BBId> = aa.foreigns.origin_value_ref(); // panic
+struct BB<'a, T> {
+    group: &'a T,
+    unused: u8,
+}
 
-    let _: &u32 = &super::identity(&aa.group).g1; // panic
-    let _: &String = &aa.get_group().g2; // panic
-    let _: &String = &aa.get_group().get_g2(); // panic
+fn access(entity: &mut AA) -> &MyString {
+    {
+        // all ok
 
-    aa.set_name("name1".to_string()); // ok
-    aa.set_g1(1); // ok
-    aa.set_name_if_empty("name2".to_string()); // panic
+        match &entity.name {
+            bagua::entity::field::Field::Unloaded => {}
+            bagua::entity::field::Field::Unchanged(_) => {}
+            bagua::entity::field::Field::Set(_) => {}
+        }
+        let Field::Unchanged(name) = &entity.name else {
+            todo!()
+        };
+        if let Field::Unchanged(name) = &entity.name {
+            todo!()
+        }
+        if entity.name.changed_ref().is_some() {
+            todo!();
+        }
+    }
+    &entity.name;
+    let name = &&*&*&entity.name;
+    let name = name;
+    let name_: &MyString = &&*&name;
+    let name_len: usize = name.len();
+
+    let group = &entity.group;
+    let group = group;
+    let g1: &u32 = &group.g1;
+
+    let bb = BB {
+        group: &entity.group,
+        unused: 0,
+    };
+
+    let bb_g1: u32 = *bb.group.g1;
+
+    let _: &MyString = entity.name.this(); // panic
+    let _: usize = entity.name.len(); // panic
+    let _: usize = entity.name.inner.len(); // panic
+    let _: &u32 = &entity.group.g1; // panic
+    let _: &HashSet<BBId> = entity.foreigns.origin_value_ref(); // panic
+
+    let _: &MyString = &(&entity.name); // panic
+    let _: u32 = *(&entity.group).g1; // panic
+    let _: &u32 = &super::identity(&entity.group).g1; // panic
+    let _: &String = &entity.get_group().g2; // panic
+    let _: &String = &entity.get_group().get_g2(); // panic
+
+    entity.set_name("name1".to_string()); // ok
+    entity.set_g1(1); // ok
+    entity.set_name_if_empty("name2".to_string()); // panic
 
     let AAReadOnly {
         id: _,
@@ -80,17 +123,27 @@ fn access(aa: &mut AA) {
         foreigns,
         group,
         ..
-    } = aa.read_only();
+    } = entity.read_only();
     let AAReadOnly {
         id: _,
         name,
         foreigns,
         group,
         ..
-    } = &**aa;
+    } = &**entity;
 
     let _: &MyString = &name; // panic
     let _: &HashSet<BBId> = foreigns.origin_value_ref(); // panic
     let _: &u32 = &super::identity(&group).g1; // panic
     let _: &String = &group.g2; // panic
+
+    &entity.name
 }
+
+trait This {
+    fn this(&self) -> &Self {
+        self
+    }
+}
+
+impl<T> This for Field<T> {}

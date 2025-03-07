@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Deref};
 
 use bagua::{flake_id, Entity, FieldGroup};
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ flake_id!(BBId, @serde);
 
 #[Entity]
 #[subset(AAWithOnlyId{id})]
+#[subset(AAWithName{name})]
 pub struct AA {
     id: AAId,
     name: MyString,
@@ -147,7 +148,15 @@ impl MyString {
         self.inner.is_empty()
     }
 
-    pub fn len(&self) -> usize {
-        self.inner.len()
+    // pub fn len(&self) -> usize {
+    //     self.inner.len()
+    // }
+}
+
+impl Deref for MyString {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
