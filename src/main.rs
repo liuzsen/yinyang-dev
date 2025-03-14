@@ -22,6 +22,7 @@ use yinyang::{
 fn main() -> Result<()> {
     // bagua_project()?;
 
+    // aa();
     // aa_project()?;
     // parse_find::parse_find()?;
     // parse_trait_ref()?;
@@ -33,6 +34,10 @@ fn main() -> Result<()> {
     let violations = field_checker4::FieldChecker::new(&project).check()?;
     dbg!(&violations);
     Ok(())
+}
+
+fn aa() {
+    panic!()
 }
 
 trait Repo {

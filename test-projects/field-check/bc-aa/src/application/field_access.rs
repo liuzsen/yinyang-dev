@@ -61,7 +61,7 @@ where
 }
 
 struct BB<'a, T> {
-    group: &'a T,
+    gp: &'a T,
     unused: u8,
 }
 
@@ -84,7 +84,14 @@ fn access(entity: &mut AA) -> &MyString {
             todo!();
         }
     }
-    &entity.name;
+    let aa = Some(&entity.name);
+    if true {
+        if let Some(aa) = aa {
+            todo!()
+        }
+    } else {
+        let b = aa.unwrap();
+    }
     let name = &&*&*&entity.name;
     let name = name;
     let name_: &MyString = &&*&name;
@@ -95,11 +102,12 @@ fn access(entity: &mut AA) -> &MyString {
     let g1: &u32 = &group.g1;
 
     let bb = BB {
-        group: &entity.group,
+        gp: &entity.group,
         unused: 0,
     };
 
-    let bb_g1: u32 = *bb.group.g1;
+    let bb_g1 = &bb.gp.g1;
+    let bb_g1: u32 = *bb.gp.g1;
 
     let _: &MyString = entity.name.this(); // panic
     let _: usize = entity.name.len(); // panic
@@ -109,7 +117,7 @@ fn access(entity: &mut AA) -> &MyString {
 
     let _: &MyString = &(&entity.name); // panic
     let _: u32 = *(&entity.group).g1; // panic
-    let _: &u32 = &super::identity(&entity.group).g1; // panic
+    let _: &u32 = &super::identity(&entity.group).this().g1; // panic
     let _: &String = &entity.get_group().g2; // panic
     let _: &String = &entity.get_group().get_g2(); // panic
 
@@ -119,7 +127,7 @@ fn access(entity: &mut AA) -> &MyString {
 
     let AAReadOnly {
         id: _,
-        name,
+        name: nn,
         foreigns,
         group,
         ..
@@ -137,7 +145,11 @@ fn access(entity: &mut AA) -> &MyString {
     let _: &u32 = &super::identity(&group).g1; // panic
     let _: &String = &group.g2; // panic
 
-    &entity.name
+    if true {
+        return &entity.name;
+    }
+
+    (&entity.name)
 }
 
 trait This {
@@ -146,4 +158,4 @@ trait This {
     }
 }
 
-impl<T> This for Field<T> {}
+impl<T> This for T {}

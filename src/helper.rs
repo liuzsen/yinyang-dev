@@ -1,3 +1,5 @@
+use ra_ap_hir::{Function, ModuleDef, Variant};
+use ra_ap_hir_def::hir;
 use ra_ap_ide::SearchScope;
 use ra_ap_ide_db::{
     defs::{Definition, NameClass, NameRefClass},
@@ -73,4 +75,40 @@ pub fn usages_in_current_file(sema: &Semantics, name: &ast::Name) -> Option<Usag
 
 pub fn current_fn(stmt: &ast::Stmt) -> Option<ast::Fn> {
     stmt.syntax().ancestors().find_map(ast::Fn::cast)
+}
+
+pub enum FunctionLike {
+    Fn(Function),
+    Variant(Variant),
+}
+
+impl FunctionLike {
+    pub fn to_fn(self) -> Option<Function> {
+        match self {
+            FunctionLike::Fn(fn_) => Some(fn_),
+            FunctionLike::Variant(_) => None,
+        }
+    }
+}
+
+pub fn resolve_fn(sema: &Semantics, name_ref: &ast::NameRef) -> Option<FunctionLike> {
+    let parent = name_ref.syntax().parent()?;
+
+    if let Some(path) = ast::PathSegment::cast(parent.clone()).map(|it| it.parent_path()) {
+        let resolution = sema.resolve_path(&path)?;
+        match resolution {
+            ra_ap_hir::PathResolution::Def(ModuleDef::Function(fn_)) => {
+                return Some(FunctionLike::Fn(fn_));
+            }
+            ra_ap_hir::PathResolution::Def(ModuleDef::Variant(variant)) => {
+                return Some(FunctionLike::Variant(variant));
+            }
+            _ => return None,
+        }
+    }
+    if let Some(fn_) = parent.parent().and_then(ast::MethodCallExpr::cast) {
+        return sema.resolve_method_call(&fn_).map(FunctionLike::Fn);
+    }
+
+    None
 }

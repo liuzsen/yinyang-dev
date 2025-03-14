@@ -206,7 +206,7 @@ impl<'a> FieldChecker<'a> {
             for field in fields {
                 let field_name = field.name()?;
                 let field_type = field.ty()?;
-                let current_field_path = FieldPath::new_scalar(field_name.text().to_string());
+                let current_field_path = FieldPath::new_segment(field_name.text().to_string());
 
                 let field_type_hir = sema.resolve_type(&field_type)?;
                 if bagua.impls_subset(sema.db, &field_type_hir) {
@@ -321,10 +321,10 @@ impl FieldGroup {
     fn flatten_fields(self, sema: &Semantics) -> Vec<FieldPath> {
         let mut fields = vec![];
         for scalar in self.scalar_like {
-            fields.push(FieldPath::new_scalar(scalar));
+            fields.push(FieldPath::new_segment(scalar));
         }
         for (group, group_fields) in self.group {
-            let prefix = FieldPath::new_scalar(group);
+            let prefix = FieldPath::new_segment(group);
             let group_fields = group_fields.flatten_fields(sema);
             for field in group_fields {
                 fields.push(prefix.join(&field));
@@ -865,16 +865,216 @@ mod bb {
 mod cc {
     use std::{collections::HashMap, sync::Arc};
 
-    use ra_ap_syntax::ast;
+    use ra_ap_syntax::{
+        ast::{self, HasName},
+        AstNode, SyntaxKind, SyntaxNode,
+    };
 
-    use crate::entity::FieldPath;
+    use crate::{entity::FieldPath, helper, Semantics};
 
+    pub struct TraceNodeRightValueAccess {
+        node: TraceNodeRightValue,
+        deref_triggered: bool,
+        field_path: Option<FieldPath>,
+    }
+
+    pub enum TraceNodeRightValue {
+        FieldExpr(ast::FieldExpr),
+        RefFieldExpr(ast::RefExpr),
+        StarDeref(ast::PrefixExpr),
+        PassSelf(ast::PathExpr),
+    }
+
+    #[derive(Clone)]
     pub enum TraceNode {
         FieldExpr(ast::FieldExpr),
         RefFieldExpr(ast::RefExpr),
         StarDeref(ast::PrefixExpr),
-        PassSelf(ast::NameRef),
+        PassSelf(ast::PathExpr),
         Bind(ast::Pat),
+    }
+
+    pub enum DerefTrigger {
+        FieldExpr(ast::FieldExpr),
+        RefFieldExpr(ast::RefExpr),
+        StarDeref(ast::PrefixExpr),
+    }
+
+    pub struct AccessTrace {
+        nodes: Vec<TraceNode>,
+        deref_at: DerefTrigger,
+        field_path: FieldPath,
+    }
+
+    pub struct FieldGroup {
+        fields: Arc<HashMap<String, Field>>,
+    }
+
+    pub enum Field {
+        AlwaysLoaded,
+        ScalarField,
+        GroupField(Box<FieldGroup>),
+    }
+
+    impl AccessTrace {
+        fn track(sema: &Semantics, bind: ast::Pat, group: FieldGroup) -> Vec<AccessTrace> {
+            let ident = match bind.clone() {
+                ast::Pat::IdentPat(ident_pat) => ident_pat,
+                _ => {
+                    todo!()
+                }
+            };
+            let usages = helper::usages_in_current_file(sema, &ident.name().unwrap()).unwrap();
+
+            let mut nodes = vec![TraceNode::Bind(bind)];
+            let mut traces = vec![];
+
+            for (_, usages) in usages {
+                for usage in usages {
+                    let name_ref = usage.name.as_name_ref().unwrap();
+                    let right_value =
+                        TraceNodeRightValue::from_name_ref(sema, name_ref, &group).unwrap();
+                    nodes.push(right_value.node.to_trace_node());
+
+                    if right_value.deref_triggered {
+                        traces.push(AccessTrace {
+                            nodes: nodes.clone(),
+                            deref_at: todo!(),
+                            field_path: right_value.field_path.unwrap(),
+                        })
+                    } else {
+                        todo!()
+                    }
+
+                    todo!()
+                }
+            }
+
+            todo!()
+        }
+    }
+
+    impl TraceNodeRightValue {
+        fn to_trace_node(self) -> TraceNode {
+            todo!()
+        }
+
+        fn from_name_ref(
+            sema: &Semantics,
+            group_ref: &ast::NameRef,
+            field_group: &FieldGroup,
+        ) -> Option<TraceNodeRightValueAccess> {
+            let path_expr = group_ref
+                .syntax()
+                .ancestors()
+                .find_map(ast::PathExpr::cast)?;
+
+            let mut res_expr = Self::PassSelf(path_expr.clone());
+
+            loop {
+                let Some(parent_expr) = res_expr.syntax().parent().and_then(ast::Expr::cast) else {
+                    break;
+                };
+
+                let ty = sema.type_of_expr(&parent_expr)?;
+
+                match parent_expr {
+                    ast::Expr::FieldExpr(field_expr) => {
+                        let name_ref = field_expr.name_ref()?;
+                        let field = name_ref.text();
+                        res_expr = Self::FieldExpr(field_expr);
+                        match field_group.fields.get(field.as_str())? {
+                            Field::AlwaysLoaded => return None,
+                            Field::ScalarField => {
+                                let is_deref = ty.adjusted.is_some();
+                                if is_deref {
+                                    return Some(TraceNodeRightValueAccess {
+                                        node: res_expr,
+                                        deref_triggered: is_deref,
+                                        field_path: todo!(),
+                                    });
+                                }
+                            }
+                            Field::GroupField(field_group) => {}
+                        };
+                    }
+                    _ => {
+                        todo!()
+                    }
+                }
+            }
+
+            todo!()
+            // Some(res_expr)
+        }
+
+        fn syntax(&self) -> SyntaxNode {
+            todo!()
+        }
+    }
+}
+
+mod dd {
+    use std::{collections::HashMap, sync::Arc};
+
+    use ra_ap_syntax::{
+        ast::{self, HasName},
+        AstNode, SyntaxKind, SyntaxNode,
+    };
+
+    use crate::{entity::FieldPath, helper, Semantics};
+
+    #[derive(Clone)]
+    pub struct TraceNodeRightValue {
+        node: RightTraceNode,
+        kind: NodeTypeKind,
+        field_path: FieldPath,
+        deref_triggered: bool,
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum NodeTypeKind {
+        Scalar,
+        FieldGroup,
+    }
+
+    impl NodeTypeKind {
+        /// Returns `true` if the node type kind is [`Scalar`].
+        ///
+        /// [`Scalar`]: NodeTypeKind::Scalar
+        #[must_use]
+        pub fn is_scalar(&self) -> bool {
+            matches!(self, Self::Scalar)
+        }
+
+        /// Returns `true` if the node type kind is [`FieldGroup`].
+        ///
+        /// [`FieldGroup`]: NodeTypeKind::FieldGroup
+        #[must_use]
+        pub fn is_field_group(&self) -> bool {
+            matches!(self, Self::FieldGroup)
+        }
+    }
+
+    #[derive(Clone)]
+    pub enum RightTraceNode {
+        FieldExpr(ast::FieldExpr),
+        RefFieldExpr(ast::RefExpr),
+        StarDeref(ast::PrefixExpr),
+        PassSelf(ast::PathExpr),
+    }
+
+    #[derive(Clone)]
+    pub enum TraceNode {
+        RightValue(RightTraceNode),
+        LeftValue(ast::Pat),
+        ReturnValue(RightTraceNode),
+    }
+
+    pub enum DerefTrigger {
+        FieldExpr(ast::FieldExpr),
+        RefFieldExpr(ast::RefExpr),
+        StarDeref(ast::PrefixExpr),
     }
 
     pub struct AccessTrace {
@@ -890,5 +1090,1024 @@ mod cc {
         AlwaysLoaded,
         ScalarField,
         GroupField(Box<FieldGroup>),
+    }
+
+    fn track_field_group(
+        sema: &Semantics,
+        bind_to: ast::Pat,
+        field_group: FieldGroup,
+    ) -> Option<Vec<AccessTrace>> {
+        let name = match &bind_to {
+            ast::Pat::IdentPat(ident_pat) => ident_pat,
+            _ => {
+                todo!()
+            }
+        };
+        let usages = helper::usages_in_current_file(sema, &name.name()?)?;
+        let head_node = TraceNode::LeftValue(bind_to.clone());
+        let mut traces = vec![];
+        for (_, usages) in usages {
+            for usage in usages {
+                let name_ref = usage.name.as_name_ref()?;
+                let path_expr = name_ref
+                    .syntax()
+                    .parent()?
+                    .parent()?
+                    .parent()
+                    .map(ast::PathExpr::cast)??;
+                let right_value = extract_right_value_node(sema, path_expr)?;
+                let current_nodes = vec![
+                    head_node.clone(),
+                    TraceNode::RightValue(right_value.node.clone()),
+                ];
+
+                if right_value.deref_triggered {
+                    traces.push(AccessTrace {
+                        nodes: current_nodes,
+                        field_path: right_value.field_path,
+                    });
+                    break;
+                }
+
+                let kind = right_value.kind;
+                if let Some(assign_to) = right_value_assign_to(sema, right_value.clone()) {
+                    let bind_to = match assign_to {
+                        RightValueAssignTo::LetBind(pat) => pat,
+                        RightValueAssignTo::MethodCall(method_call_expr) => todo!(),
+                        RightValueAssignTo::Arg(call_expr, index) => {
+                            todo!()
+                        }
+                        RightValueAssignTo::Return(group, path, ..) => {
+                            traces.push(AccessTrace {
+                                nodes: current_nodes,
+                                field_path: path,
+                            });
+                            break;
+                        }
+                    };
+                    if kind.is_field_group() {
+                        let field_group = field_group
+                            .get_field(&right_value.field_path)?
+                            .to_field_group()?;
+                        if let Some(mut sub_traces) = track_field_group(sema, bind_to, field_group)
+                        {
+                            for sub_trace in &mut sub_traces {
+                                sub_trace.field_path =
+                                    right_value.field_path.join(&sub_trace.field_path);
+                                let mut nodes = current_nodes.clone();
+                                nodes.extend(sub_trace.nodes.drain(..));
+                                sub_trace.nodes = nodes;
+                            }
+                            traces.extend(sub_traces);
+                        }
+                    } else {
+                        let nodess = track_scalar_field(sema, bind_to);
+                        for mut nodes in nodess {
+                            let mut current_nodes = current_nodes.clone();
+                            current_nodes.extend(nodes.drain(..));
+                            traces.push(AccessTrace {
+                                nodes: current_nodes,
+                                field_path: right_value.field_path.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        todo!()
+    }
+
+    struct VirtualAssign(ast::Expr);
+
+    struct VirtualFieldGroup(ast::Adt);
+
+    mod aa {
+        use std::collections::HashMap;
+
+        use ra_ap_syntax::ast;
+
+        pub struct FieldGroup {
+            fields: HashMap<FieldPath, Field>,
+        }
+
+        pub struct Field {
+            path: FieldPath,
+            ty: ast::Type,
+            kind: FieldKind,
+        }
+
+        pub enum FieldKind {
+            AlwaysLoaded,
+            ScalarField,
+            GroupField,
+        }
+
+        pub struct FieldPath {
+            segments: Vec<PathSegment>,
+        }
+
+        enum PathSegment {
+            RecordField(String),
+            EnumVariant(String),
+            TupleField(u8),
+        }
+    }
+
+    impl FieldGroup {
+        fn get_field(&self, path: &FieldPath) -> Option<Field> {
+            todo!()
+        }
+    }
+
+    impl Field {
+        fn to_field_group(self) -> Option<FieldGroup> {
+            todo!()
+        }
+    }
+
+    enum RightValueAssignTo {
+        LetBind(ast::Pat),
+        MethodCall(ast::MethodCallExpr),
+        Arg(ast::CallExpr, usize),
+        Return(FieldGroup, FieldPath, ast::Expr),
+    }
+
+    fn right_value_assign_to(
+        sema: &Semantics,
+        rv: TraceNodeRightValue,
+    ) -> Option<RightValueAssignTo> {
+        todo!()
+    }
+
+    fn extract_right_value_node(
+        sema: &Semantics,
+        group_ref: ast::PathExpr,
+    ) -> Option<TraceNodeRightValue> {
+        todo!()
+    }
+
+    fn track_scalar_field(sema: &Semantics, bind_to: ast::Pat) -> Vec<Vec<TraceNode>> {
+        todo!()
+    }
+}
+
+mod ee {
+    use std::collections::HashMap;
+
+    use ra_ap_syntax::ast;
+
+    pub struct FieldGroup {
+        fields: HashMap<FieldPath, Field>,
+    }
+
+    #[derive(Clone)]
+    pub struct Field {
+        path: FieldPath,
+        ty: ast::Type,
+        kind: FieldKind,
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum FieldKind {
+        AlwaysLoaded,
+        ScalarField,
+        GroupField,
+        Iterator,
+    }
+
+    impl FieldKind {
+        /// Returns `true` if the field kind is [`GroupField`].
+        ///
+        /// [`GroupField`]: FieldKind::GroupField
+        #[must_use]
+        pub fn is_group_field(&self) -> bool {
+            matches!(self, Self::GroupField)
+        }
+    }
+
+    #[derive(PartialEq, Eq, Hash, Clone)]
+    pub struct FieldPath {
+        segments: Vec<PathSegment>,
+    }
+
+    #[derive(PartialEq, Eq, Hash, Clone)]
+    enum PathSegment {
+        RecordField(String),
+        EnumVariant(String),
+        TupleField(u8),
+    }
+
+    impl FieldPath {
+        fn starts_with(&self, base: &FieldPath) -> bool {
+            todo!()
+        }
+
+        fn strip_prefix(&self, prefix: &FieldPath) -> Self {
+            todo!()
+        }
+    }
+
+    impl FieldGroup {
+        fn get_field_group(&self, path: FieldPath) -> Option<FieldGroup> {
+            let group = self.fields.get(&path)?;
+            if !group.kind.is_group_field() {
+                return None;
+            }
+            let fields = self
+                .fields
+                .values()
+                .filter_map(|f| {
+                    if !f.path.starts_with(&group.path) {
+                        return None;
+                    }
+                    let mut f = f.clone();
+                    f.path = f.path.strip_prefix(&group.path);
+
+                    Some((f.path.clone(), f))
+                })
+                .collect();
+
+            Some(FieldGroup { fields })
+        }
+    }
+
+    struct Node {
+        node_kind: NodeKind,
+        deref_triggered: bool,
+        // field_or_root: FieldOrRoot,
+    }
+
+    enum FieldOrRoot {
+        Root(FieldGroup),
+        Field(Field, FieldGroup),
+    }
+
+    enum NodeKind {
+        LetBindTo(ast::Pat),
+        ArgBind(ast::Pat),
+        RecordFieldBind {
+            field: ast::NameRef,
+            is_return: bool,
+        },
+        ReturnGroup(ReadNode),
+        ReturnScalar(ReadNode),
+        Read {
+            node: ReadNode,
+        },
+        ReturnTmpGroup {
+            read: ReadNode,
+            group: FieldGroup,
+            path: FieldPath,
+        },
+        MethodCall(ast::MethodCallExpr, Option<NewGroupOrScalar>),
+        PathExpr(ast::PathExpr),
+    }
+
+    enum TempExpr {
+        MethodCall(ast::MethodCallExpr),
+        PathExpr(ast::PathExpr),
+    }
+
+    enum NewGroupOrScalar {
+        Group(FieldGroup, FieldPath),
+        Scalar(FieldPath),
+    }
+
+    enum ReadNode {
+        FieldExpr(ast::FieldExpr),
+        RefFieldExpr(ast::RefExpr),
+    }
+}
+
+mod ff {
+    use std::collections::HashMap;
+
+    use anyhow::{bail, Context, Result};
+    use ra_ap_hir::HasSource;
+    use ra_ap_ide::RootDatabase;
+    use ra_ap_syntax::{
+        ast::{self, HasName},
+        AstNode, SyntaxKind, SyntaxNode,
+    };
+
+    use crate::{entity::FieldPath, helper, Semantics};
+
+    #[derive(Clone)]
+    pub enum TraceNode {
+        RightValue(RightTraceNode),
+        LeftValue(LeftTraceNode),
+    }
+
+    #[derive(Clone)]
+    pub enum LeftTraceNode {
+        LetBind(ast::Pat),
+        MethodArg(ast::Pat),
+    }
+
+    #[derive(Clone)]
+    pub enum RightTraceNode {
+        FieldExpr(ast::FieldExpr),
+        RefExpr(ast::RefExpr),
+        DerefExpr(ast::PrefixExpr),
+        PassSelf(ast::PathExpr),
+    }
+
+    pub struct FieldGroup {
+        fields: HashMap<FieldPath, Field>,
+    }
+
+    #[derive(Clone)]
+    pub struct Field {
+        path: FieldPath,
+        ty: ast::Type,
+        kind: FieldKind,
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum FieldKind {
+        AlwaysLoaded,
+        ScalarField,
+        GroupField,
+    }
+
+    impl FieldKind {
+        #[must_use]
+        pub fn is_group_field(&self) -> bool {
+            matches!(self, Self::GroupField)
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct AccessChain {
+        nodes: Vec<TraceNode>,
+    }
+
+    pub struct AccessTrace {
+        chain: AccessChain,
+        field_path: FieldPath,
+    }
+
+    fn track_entity_fields(
+        sema: &Semantics,
+        let_bind_to: ast::IdentPat,
+        field_group: FieldGroup,
+    ) -> Result<Vec<AccessTrace>> {
+        todo!()
+    }
+
+    impl AccessChain {
+        fn new(nodes: Vec<TraceNode>) -> Self {
+            Self { nodes }
+        }
+
+        fn extend(&mut self, nodes: Vec<TraceNode>) {
+            self.nodes.extend(nodes);
+        }
+    }
+
+    fn track_field_group(
+        sema: &Semantics,
+        bind_to: LeftTraceNode,
+        field_group: FieldGroup,
+    ) -> Result<Vec<AccessTrace>> {
+        let name = match &bind_to {
+            LeftTraceNode::LetBind(pat) | LeftTraceNode::MethodArg(pat) => match pat {
+                ast::Pat::IdentPat(ident_pat) => ident_pat.name().unwrap(),
+                _ => todo!(),
+            },
+        };
+
+        let usages = helper::usages_in_current_file(sema, &name).context("no usages")?;
+        let head_node = TraceNode::LeftValue(bind_to.clone());
+
+        let mut traces = vec![];
+        for (_, usages) in usages {
+            for usage in usages {
+                let name_ref = usage.name.as_name_ref().context("no name ref")?;
+                let path_expr = name_ref
+                    .syntax()
+                    .parent()
+                    .context("no parent expr")?
+                    .parent()
+                    .context("no parent expr")?
+                    .parent()
+                    .map(ast::PathExpr::cast)
+                    .context("no parent path expr")?
+                    .context("not a path expr")?;
+
+                let Some(right_value) = extract_right_value_node(sema, &field_group, path_expr)?
+                else {
+                    continue;
+                };
+
+                let scope_chain = AccessChain::new(vec![
+                    head_node.clone(),
+                    TraceNode::RightValue(right_value.node.clone()),
+                ]);
+
+                if right_value.deref_triggered {
+                    traces.push(AccessTrace {
+                        chain: scope_chain,
+                        field_path: right_value.field_path,
+                    });
+                    break;
+                }
+
+                let kind = right_value.kind;
+                if let Some(assign_to) = right_value_assign_to(sema, right_value.clone())? {
+                    let bind_to = match assign_to {
+                        RightValueAssignTo::LetBind(pat) => LeftTraceNode::LetBind(pat),
+                        RightValueAssignTo::FnArg(pat) => LeftTraceNode::MethodArg(pat),
+                    };
+
+                    if kind.is_field_group() {
+                        let field_group = field_group
+                            .get_field(&right_value.field_path)
+                            .context("no field")?
+                            .to_field_group()
+                            .context("not a field group")?;
+
+                        let mut sub_traces = track_field_group(sema, bind_to, field_group)?;
+                        for sub_trace in &mut sub_traces {
+                            sub_trace.field_path =
+                                right_value.field_path.join(&sub_trace.field_path);
+                            let mut chain = scope_chain.clone();
+                            chain.extend(std::mem::take(&mut sub_trace.chain.nodes));
+                            sub_trace.chain = chain;
+                        }
+                        traces.extend(sub_traces);
+                    } else {
+                        let chains = track_scalar_field(sema, bind_to);
+                        for chain in chains {
+                            let mut scope_chain = scope_chain.clone();
+                            scope_chain.extend(chain.nodes);
+                            traces.push(AccessTrace {
+                                chain: scope_chain,
+                                field_path: right_value.field_path.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        todo!()
+    }
+
+    #[derive(Clone)]
+    pub struct TraceNodeRightValue {
+        node: RightTraceNode,
+        kind: NodeKind,
+        field_path: FieldPath,
+        deref_triggered: bool,
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum NodeKind {
+        Scalar,
+        FieldGroup,
+    }
+
+    impl NodeKind {
+        /// Returns `true` if the node type kind is [`FieldGroup`].
+        ///
+        /// [`FieldGroup`]: NodeTypeKind::FieldGroup
+        #[must_use]
+        pub fn is_field_group(&self) -> bool {
+            matches!(self, Self::FieldGroup)
+        }
+    }
+
+    fn extract_right_value_node(
+        sema: &Semantics,
+        field_group: &FieldGroup,
+        path_expr: ast::PathExpr,
+    ) -> Result<Option<TraceNodeRightValue>> {
+        let mut field_path = FieldPath::new_current();
+        let mut deref_triggered = false;
+        let mut node = RightTraceNode::PassSelf(path_expr);
+        let mut kind = NodeKind::Scalar;
+        loop {
+            let Some(parent_expr) = node.syntax().parent().and_then(ast::Expr::cast) else {
+                break;
+            };
+
+            deref_triggered = is_deref_triggered(sema, &parent_expr)?;
+
+            match parent_expr {
+                ast::Expr::FieldExpr(field_expr) => {
+                    let name_ref = field_expr.name_ref().context("no name ref")?;
+                    field_path.push(name_ref.text().to_string());
+
+                    let field = field_group
+                        .get_field(&field_path)
+                        .context("no field in group")?;
+
+                    match field.kind {
+                        FieldKind::AlwaysLoaded => return Ok(None),
+                        FieldKind::ScalarField => kind = NodeKind::Scalar,
+                        FieldKind::GroupField => kind = NodeKind::FieldGroup,
+                    };
+                    node = RightTraceNode::FieldExpr(field_expr);
+                }
+                _ => {
+                    break;
+                }
+            }
+            if deref_triggered {
+                break;
+            }
+        }
+
+        let right_value = TraceNodeRightValue {
+            node,
+            kind,
+            field_path,
+            deref_triggered,
+        };
+
+        Ok(Some(right_value))
+    }
+
+    fn is_deref_triggered(sema: &Semantics, expr: &ast::Expr) -> Result<bool> {
+        let ty = sema.type_of_expr(expr).context("cannot resolve type")?;
+        todo!()
+    }
+
+    enum RightValueAssignTo {
+        LetBind(ast::Pat),
+        FnArg(ast::Pat),
+    }
+
+    fn right_value_assign_to(
+        sema: &Semantics,
+        rv: TraceNodeRightValue,
+    ) -> Result<Option<RightValueAssignTo>> {
+        if is_returnning(rv.node.syntax()) {
+            bail!("You should not return an Entity field");
+        }
+
+        let parent = rv
+            .node
+            .syntax()
+            .parent()
+            .context("right value node has no parent")?;
+
+        match parent.kind() {
+            SyntaxKind::METHOD_CALL_EXPR => {
+                let fn_call = ast::MethodCallExpr::cast(parent).unwrap();
+                let fn_ref = fn_call.name_ref().context("no fn name ref")?;
+                let pat = get_param_pat(sema, fn_ref, 0)?;
+                Ok(Some(RightValueAssignTo::FnArg(pat)))
+            }
+            SyntaxKind::ARG_LIST => {
+                let arg_list = ast::ArgList::cast(parent).unwrap();
+                let index = arg_list
+                    .args()
+                    .position(|arg| arg.syntax() == rv.node.syntax())
+                    .unwrap();
+                let fn_ref = arg_list
+                    .syntax()
+                    .prev_sibling()
+                    .context("arg list has no prev sibling")?;
+                let name_ref = fn_ref
+                    .descendants()
+                    .find_map(ast::NameRef::cast)
+                    .context("no fn name ref")?;
+
+                let pat = get_param_pat(sema, name_ref, index)?;
+                Ok(Some(RightValueAssignTo::FnArg(pat)))
+            }
+            SyntaxKind::LET_STMT => {
+                let let_stmt = ast::LetStmt::cast(parent).unwrap();
+                let pat = let_stmt.pat().context("no pat in let stmt")?;
+                Ok(Some(RightValueAssignTo::LetBind(pat)))
+            }
+            SyntaxKind::RECORD_EXPR_FIELD => {
+                bail!("You should not assign an entity field to a record field");
+            }
+            _ => {
+                bail!("unknown assignable node");
+            }
+        }
+    }
+
+    fn is_returnning(expr: &SyntaxNode) -> bool {
+        let mut node = expr.clone();
+        loop {
+            let Some(parent) = node.parent() else {
+                return false;
+            };
+
+            let Some(expr) = ast::Expr::cast(parent) else {
+                break;
+            };
+
+            if matches!(expr, ast::Expr::ReturnExpr(_)) {
+                return true;
+            }
+            node = expr.syntax().clone();
+        }
+        let Some(stmt_list) = node.parent() else {
+            return false;
+        };
+        let Some(block_expr) = stmt_list.parent() else {
+            return false;
+        };
+        let Some(fn_) = block_expr.parent() else {
+            return false;
+        };
+
+        if ast::Fn::can_cast(fn_.kind()) {
+            return true;
+        }
+
+        false
+    }
+
+    #[test]
+    fn test_is_the_fn_return() {
+        let code = r#"
+fn main() {
+    println!("Hello, world!")
+}
+        "#;
+        let parse = ast::SourceFile::parse(code, ra_ap_ide::Edition::CURRENT);
+        let file = parse.ok();
+    }
+
+    fn get_param_pat(sema: &Semantics, name_ref: ast::NameRef, index: usize) -> Result<ast::Pat> {
+        let Some(fn_) = helper::resolve_fn(sema, &name_ref) else {
+            bail!("cannot resolve fn");
+        };
+        let fn_ = fn_
+            .to_fn()
+            .context("you should not assign an entity field to an enum variant")?;
+
+        let source = fn_.source(sema.db).context("fn has no source")?;
+        let params = source.value.param_list().context("fn has no param list")?;
+        let param = params.params().skip(index).next().context("no param")?;
+        let pat = param.pat().context("no pat in param")?;
+
+        Ok(pat)
+    }
+
+    impl FieldGroup {
+        fn get_field(&self, path: &FieldPath) -> Option<Field> {
+            self.fields.get(path).cloned()
+        }
+
+        fn get_group_field(&self, path: &FieldPath) -> Option<FieldGroup> {
+            let field = self.fields.get(path).cloned()?;
+            let field_paths = self
+                .fields
+                .iter()
+                .filter_map(|(p, _)| {
+                    if p.starts_with(path) {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            todo!()
+        }
+    }
+
+    impl Field {
+        fn to_field_group(self) -> Option<FieldGroup> {
+            todo!()
+        }
+    }
+
+    fn track_scalar_field(sema: &Semantics, bind_to: LeftTraceNode) -> Vec<AccessChain> {
+        todo!()
+    }
+
+    impl RightTraceNode {
+        fn syntax(&self) -> &SyntaxNode {
+            match self {
+                RightTraceNode::FieldExpr(field_expr) => field_expr.syntax(),
+                RightTraceNode::RefExpr(ref_expr) => ref_expr.syntax(),
+                RightTraceNode::DerefExpr(prefix_expr) => prefix_expr.syntax(),
+                RightTraceNode::PassSelf(path_expr) => path_expr.syntax(),
+            }
+        }
+    }
+}
+
+mod gg {
+    use std::collections::HashMap;
+
+    use anyhow::{bail, Context, Result};
+    use ra_ap_hir::{sym::rustc_builtin_macro, HasSource};
+    use ra_ap_syntax::{
+        ast::{self, HasName},
+        AstNode, SyntaxNode,
+    };
+
+    use crate::{helper, Semantics};
+
+    #[derive(Clone)]
+    pub struct Trace {
+        nodes: Vec<TraceNode>,
+    }
+
+    impl Trace {
+        fn push(&mut self, node: TraceNode) {
+            self.nodes.push(node);
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct FnCallPoint {
+        ast: ast::Expr,
+        parent: Option<Box<FnCallPoint>>,
+    }
+
+    #[derive(Clone)]
+    pub enum TraceNode {
+        Left(LeftTraceNode),
+        Right(RightTraceNode),
+    }
+
+    #[derive(Clone)]
+    pub struct TraceCtx {
+        scope: GroupScope,
+        scope_path: Path,
+        path_in_entity: Path,
+        fn_call_point: Option<FnCallPoint>,
+    }
+
+    #[derive(Clone)]
+    pub struct RightTraceNode {
+        ast: ast::Expr,
+        trace_ctx: TraceCtx,
+        deref_triggered: bool,
+    }
+
+    #[derive(Clone)]
+    pub struct LeftTraceNode {
+        ast: ast::Pat,
+        trace_ctx: TraceCtx,
+    }
+
+    fn left_node_traces(sema: &Semantics, node: LeftTraceNode) -> Result<Vec<Trace>> {
+        let ident = match node.ast.clone() {
+            ast::Pat::IdentPat(ident_pat) => ident_pat,
+            _ => todo!(),
+        };
+        let usages = helper::usages_in_current_file(sema, &ident.name().unwrap()).unwrap();
+        let base_trace = Trace {
+            nodes: vec![TraceNode::Left(node.clone())],
+        };
+        let mut traces = vec![];
+        for (_, usages) in usages {
+            for usage in usages {
+                let name_ref = usage.name.as_name_ref().context("no name ref")?;
+
+                let Some(node) = expand_ref_to_node(sema, name_ref, &node.trace_ctx)? else {
+                    continue;
+                };
+                let deref_triggered = node.deref_triggered;
+                if deref_triggered {
+                    let mut trace = base_trace.clone();
+                    trace.push(TraceNode::Right(node));
+                    traces.push(trace);
+                } else {
+                    let mut right_nexts = vec![node];
+                    loop {
+                        let next_node = next_node(sema, &right_nexts.last().unwrap())?;
+                        if let Some(next_node) = next_node {
+                            match next_node {
+                                TraceNode::Left(left_trace_node) => {
+                                    let sub_traces = left_node_traces(sema, left_trace_node)?;
+                                    let bridge_nodes = right_nexts
+                                        .into_iter()
+                                        .map(|node| TraceNode::Right(node))
+                                        .collect::<Vec<_>>();
+                                    for sub_trace in sub_traces {
+                                        let mut trace = base_trace.clone();
+                                        trace.nodes.extend(bridge_nodes.clone());
+                                        trace.nodes.extend(sub_trace.nodes);
+                                        traces.push(trace);
+                                    }
+
+                                    break;
+                                }
+                                TraceNode::Right(right_trace_node) => {
+                                    if right_trace_node.deref_triggered {
+                                        let mut trace = base_trace.clone();
+                                        trace.push(TraceNode::Right(right_trace_node));
+                                        traces.push(trace);
+                                    } else {
+                                        right_nexts.push(right_trace_node.clone());
+                                    }
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(traces)
+    }
+
+    fn is_returning(expr: &ast::Expr) -> Result<bool> {
+        todo!()
+    }
+
+    fn next_node(sema: &Semantics, right: &RightTraceNode) -> Result<Option<TraceNode>> {
+        if is_returning(&right.ast)? {
+            let fn_call_point = right
+                .trace_ctx
+                .fn_call_point
+                .clone()
+                .context("no fn call point")?;
+            let mut ctx = right.trace_ctx.clone();
+            ctx.fn_call_point = fn_call_point.parent.map(|p| *p);
+
+            let node = TraceNode::Right(RightTraceNode {
+                ast: fn_call_point.ast,
+                trace_ctx: ctx,
+                deref_triggered: false,
+            });
+
+            return Ok(Some(node));
+        }
+
+        let parent = right
+            .ast
+            .syntax()
+            .parent()
+            .context("right node has no parent")?;
+        if let Some(let_stmt) = ast::LetStmt::cast(parent.clone()) {
+            let pat = let_stmt.pat().context("no pat in let stmt")?;
+            return Ok(Some(TraceNode::Left(LeftTraceNode {
+                ast: pat,
+                trace_ctx: right.trace_ctx.clone(),
+            })));
+        }
+        if let Some(arg_list) = ast::ArgList::cast(parent.clone()) {
+            let index = arg_list
+                .args()
+                .position(|arg| arg.syntax() == right.ast.syntax())
+                .unwrap();
+            let fn_ref = arg_list
+                .syntax()
+                .prev_sibling()
+                .context("arg list has no prev sibling")?;
+            let fn_ref = ast::NameRef::cast(fn_ref).context("no fn ref")?;
+            let fn_ = helper::resolve_fn(sema, &fn_ref).context("no fn")?;
+            let fn_ = fn_.to_fn().context("not a fn")?;
+            let source = fn_.source(sema.db).context("fn has no source")?;
+            let params = source.value.param_list().context("fn has no param list")?;
+            let param = params.params().skip(index).next().context("no param")?;
+            let pat = param.pat().context("no pat in param")?;
+            return Ok(Some(TraceNode::Left(LeftTraceNode {
+                ast: pat,
+                trace_ctx: right.trace_ctx.clone(),
+            })));
+        }
+
+        if let Some(record_field) = ast::RecordExprField::cast(parent.clone()) {
+            todo!()
+        }
+
+        if let Some(match_expr) = ast::MatchExpr::cast(parent.clone()) {
+            todo!()
+        }
+
+        Ok(None)
+    }
+
+    fn expand_ref_to_node(
+        sema: &Semantics,
+        name_ref: &ast::NameRef,
+        trace_ctx: &TraceCtx,
+    ) -> Result<Option<RightTraceNode>> {
+        let path_expr = name_ref
+            .syntax()
+            .ancestors()
+            .find_map(ast::PathExpr::cast)
+            .context("no path expr")?;
+        let mut res_expr = ast::Expr::PathExpr(path_expr);
+        let mut is_deref = false;
+        let mut trace_ctx = trace_ctx.clone();
+        let mut is_scalar = false;
+        loop {
+            let Some(parent_expr) = res_expr.syntax().parent().and_then(ast::Expr::cast) else {
+                break;
+            };
+
+            let ty = sema.type_of_expr(&parent_expr).context("no type")?;
+
+            match parent_expr {
+                ast::Expr::FieldExpr(field_expr) => {
+                    let name_ref = field_expr.name_ref().context("no name ref")?;
+                    let field = name_ref.text();
+                    res_expr = ast::Expr::FieldExpr(field_expr);
+
+                    let field = trace_ctx
+                        .scope
+                        .get_struct_name_field(&field)
+                        .context("no field")?;
+                    match field {
+                        Field::NotEntityField => return Ok(None),
+                        Field::ScalarField => {
+                            is_deref = check_if_deref_triggered(sema, &res_expr)?;
+                            is_scalar = true;
+                        }
+                        Field::GroupField(group_scope) => {
+                            trace_ctx.scope = group_scope.clone();
+                            trace_ctx.scope_path = Path::This;
+                        }
+                    }
+                }
+                ast::Expr::RefExpr(ref_expr) => {
+                    res_expr = ast::Expr::RefExpr(ref_expr);
+                    if is_scalar {
+                        is_deref = check_if_deref_triggered(sema, &res_expr)?;
+                    }
+                }
+                ast::Expr::PrefixExpr(prefix_expr) => {
+                    if is_scalar {
+                        is_deref = check_prefix_expr_deref(sema, &prefix_expr, &res_expr)?;
+                    }
+                    res_expr = ast::Expr::PrefixExpr(prefix_expr);
+                }
+                _ => {
+                    break;
+                }
+            }
+        }
+
+        let node = RightTraceNode {
+            ast: res_expr,
+            trace_ctx,
+            deref_triggered: is_deref,
+        };
+
+        Ok(Some(node))
+    }
+
+    fn check_prefix_expr_deref(
+        sema: &Semantics,
+        deref_expr: &ast::PrefixExpr,
+        child: &ast::Expr,
+    ) -> Result<bool> {
+        todo!()
+    }
+
+    fn check_if_deref_triggered(sema: &Semantics, expr: &ast::Expr) -> Result<bool> {
+        todo!()
+    }
+
+    impl GroupScope {
+        fn get_struct_name_field(&self, name: &str) -> Option<Field> {
+            todo!()
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct GroupScope {
+        fields: HashMap<FieldPath, Field>,
+    }
+
+    pub struct FieldName(String);
+
+    #[derive(Clone)]
+    pub enum Field {
+        NotEntityField,
+        ScalarField,
+        GroupField(GroupScope),
+    }
+
+    #[derive(Clone)]
+    pub enum Path {
+        This,
+        Field(FieldPath),
+    }
+
+    #[derive(Clone)]
+    pub struct FieldPath {
+        segments: Vec<PathSegment>,
+    }
+
+    #[derive(Clone)]
+    enum PathSegment {
+        RecordStruct(String),
+        EnumVariant(String),
+        Tuple(u8),
+    }
+
+    pub enum TraceNodeAst {
+        Left(ast::Pat),
+        Right(ast::Expr),
     }
 }

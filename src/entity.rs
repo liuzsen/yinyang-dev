@@ -27,16 +27,28 @@ pub struct FieldPath {
 }
 
 impl FieldPath {
-    pub fn new_scalar(name: String) -> Self {
+    pub fn new_current() -> Self {
+        Self { segments: vec![] }
+    }
+    pub fn new_segment(name: String) -> Self {
         Self {
             segments: vec![name],
         }
+    }
+
+    pub fn starts_with(&self, base: &Self) -> bool {
+        self.segments.len() >= base.segments.len()
+            && self.segments[..base.segments.len()] == base.segments
     }
 
     pub fn join(&self, other: &Self) -> Self {
         let mut segments = self.segments.clone();
         segments.extend(other.segments.clone());
         Self { segments }
+    }
+
+    pub fn push(&mut self, segment: String) {
+        self.segments.push(segment);
     }
 }
 
