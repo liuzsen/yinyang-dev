@@ -95,7 +95,7 @@ pub fn resolve_fn(sema: &Semantics, name_ref: &ast::NameRef) -> Option<FunctionL
     let parent = name_ref.syntax().parent()?;
 
     if let Some(path) = ast::PathSegment::cast(parent.clone()).map(|it| it.parent_path()) {
-        let resolution = sema.resolve_path(&path)?;
+        let resolution = dbg!(sema.resolve_path(dbg!(&path)))?;
         match resolution {
             ra_ap_hir::PathResolution::Def(ModuleDef::Function(fn_)) => {
                 return Some(FunctionLike::Fn(fn_));

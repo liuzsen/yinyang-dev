@@ -15,7 +15,7 @@ use ra_ap_syntax::{
 };
 
 use crate::{
-    entity::{FieldPath, Subset},
+    entity::{NamedRefPath, Subset},
     loader::{BaguaProject, Usecase},
     Semantics,
 };
@@ -27,7 +27,7 @@ pub struct FieldChecker {
 #[derive(Debug)]
 pub struct FieldAccessViolation {
     pub local_def: Position,
-    pub allowed_fields: Vec<FieldPath>,
+    pub allowed_fields: Vec<NamedRefPath>,
     pub violations: Vec<AccessStack>,
 }
 

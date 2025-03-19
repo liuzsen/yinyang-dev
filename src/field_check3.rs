@@ -10,7 +10,7 @@ use ra_ap_syntax::{
 
 use crate::{
     bc_context::UseCaseMod,
-    entity::FieldPath,
+    entity::NamedRefPath,
     helper,
     loader::{Bagua, BaguaProject},
     Database, Semantics,
@@ -22,7 +22,7 @@ pub struct FieldChecker<'a> {
 
 pub struct EntityLocalVar {
     def: ast::Name,
-    fields: HashMap<FieldPath, FieldState>,
+    fields: HashMap<NamedRefPath, FieldState>,
 }
 
 pub enum FieldState {

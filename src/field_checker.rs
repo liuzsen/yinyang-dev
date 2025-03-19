@@ -10,7 +10,7 @@ use ra_ap_syntax::{
 };
 
 use crate::{
-    entity::{Entity, FieldPath, Subset, SubsetField},
+    entity::{Entity, NamedRefPath, Subset, SubsetField},
     loader::{BaguaProject, Usecase},
     Semantics,
 };
@@ -28,7 +28,7 @@ impl FieldChecker {
 #[derive(Debug)]
 pub struct FieldAccessViolation {
     pub local_def: Position,
-    pub allowed_fields: Vec<FieldPath>,
+    pub allowed_fields: Vec<NamedRefPath>,
     pub violations: Vec<AccessStack>,
 }
 
@@ -331,7 +331,7 @@ impl EntityLocalDef {
 }
 
 impl EntityVariantUsage {
-    fn access_field_path(&self) -> Option<FieldPath> {
+    fn access_field_path(&self) -> Option<NamedRefPath> {
         match self {
             EntityVariantUsage::FieldAccess(field_expr) => {
                 let name = field_expr.name_ref()?;

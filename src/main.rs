@@ -14,7 +14,7 @@ use ra_ap_syntax::{
 };
 use ra_ap_vfs::{AbsPath, VfsPath};
 use yinyang::{
-    field_checker, field_checker2, field_checker4, loader, parse_find,
+    field_checker, field_checker2, field_checker4, field_checker5, loader, parse_find,
     trait_ref::parse_trait_ref,
     workspace::{self, Workspace},
 };
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         "/home/sen/framework-dev/yinyang-dev/test-projects/field-check",
     )?;
 
-    let violations = field_checker4::FieldChecker::new(&project).check()?;
+    let violations = field_checker5::FieldChecker::new(&project).check()?;
     dbg!(&violations);
     Ok(())
 }

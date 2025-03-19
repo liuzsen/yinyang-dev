@@ -1,3 +1,6 @@
+use std::ops::Deref;
+use std::sync::Arc;
+
 use ra_ap_hir::{Semantics, Struct};
 use ra_ap_ide::RootDatabase;
 use ra_ap_syntax::ast;
@@ -9,7 +12,7 @@ pub struct Entity {
 }
 
 pub struct EntityField {
-    pub path: FieldPath,
+    pub path: NamedRefPath,
     pub kind: EnitityFieldKind,
 }
 
@@ -22,18 +25,72 @@ pub enum EnitityFieldKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
-pub struct FieldPath {
-    segments: Vec<String>,
+pub struct NamedRefPath {
+    segments: Vec<Arc<FieldName>>,
 }
 
-impl FieldPath {
-    pub fn new_current() -> Self {
+// #[derive(Debug, Clone, PartialEq, Hash, Eq)]
+// pub struct NamedRefPathBorrow<'a> {
+//     segments: &'a [FieldName],
+// }
+// use std::path::Path;
+// use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+pub struct FieldName(pub String);
+
+impl FieldName {
+    pub fn to_string(self) -> String {
+        self.0
+    }
+}
+
+impl NamedRefPath {
+    pub fn dot_string(&self) -> String {
+        let mut out = String::new();
+
+        for s in &self.segments {
+            out += ".";
+            out += s.0.as_str();
+        }
+
+        out
+    }
+
+    pub fn new_this() -> Self {
         Self { segments: vec![] }
     }
+
+    pub fn is_this(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
     pub fn new_segment(name: String) -> Self {
         Self {
-            segments: vec![name],
+            segments: vec![Arc::new(FieldName(name))],
         }
+    }
+
+    pub fn segment(&self) -> Option<&FieldName> {
+        if self.segments.len() == 1 {
+            self.segments.last().map(|s| &**s)
+        } else {
+            None
+        }
+    }
+
+    pub fn split_at_1(&self) -> (&FieldName, Self) {
+        let (first, remain) = self.segments.split_at(1);
+        (
+            &first[0],
+            NamedRefPath {
+                segments: Vec::from_iter(remain.iter().cloned()),
+            },
+        )
     }
 
     pub fn starts_with(&self, base: &Self) -> bool {
@@ -48,7 +105,7 @@ impl FieldPath {
     }
 
     pub fn push(&mut self, segment: String) {
-        self.segments.push(segment);
+        self.segments.push(Arc::new(FieldName(segment)));
     }
 }
 
@@ -60,7 +117,7 @@ pub struct Subset {
 
 #[derive(Debug)]
 pub struct SubsetField {
-    pub path: FieldPath,
+    pub path: NamedRefPath,
 }
 
 impl Entity {
@@ -70,7 +127,7 @@ impl Entity {
 }
 
 impl Subset {
-    pub fn contains(&self, field_path: &FieldPath) -> bool {
+    pub fn contains(&self, field_path: &NamedRefPath) -> bool {
         self.fields.iter().any(|f| f.path == *field_path)
     }
 }
