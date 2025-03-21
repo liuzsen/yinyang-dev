@@ -7,6 +7,7 @@ use anyhow::Result;
 use chalk_ir::TyKind;
 use indexmap::IndexMap;
 use ra_ap_hir::HasSource;
+use ra_ap_hir::HirFileId;
 use ra_ap_hir::{
     db::{DefDatabase, HirDatabase},
     Adt, InFile, Struct,
@@ -157,7 +158,7 @@ impl<'a> FieldChecker<'a> {
             .as_source_file_id(&self.project.db)
             .context("uc module not found")?;
         let file_ast = sema.parse(file_id);
-        // dbg!(&file_ast);
+        dbg!(&file_ast);
 
         let entity_local_defs = self.entity_local_defs(&sema, &file_ast)?;
         // dbg!(&entity_local_defs);
@@ -165,19 +166,20 @@ impl<'a> FieldChecker<'a> {
         for entity_var in entity_local_defs {
             let field_group = entity_var.field_group.to_any_filed_group();
             let init_node = tracer::LeftTraceNode {
-                ast: ast::Pat::IdentPat(entity_var.pat.clone()),
+                ast: From::from(ast::Pat::IdentPat(entity_var.pat.clone())),
                 trace_ctx: tracer::TraceCtx {
                     scope: field_group,
                     path_in_scope: tracer::ReferPath::new_this(),
                     path_in_entity: NamedRefPath::new_this(),
                     fn_call_point: None,
                 },
-                file_id: file_id.file_id(),
+                file_id: HirFileId::from(file_id),
             };
             let traces = init_node.gen_traces(&sema, &self.project.bagua)?;
 
             for trace in traces {
                 let out = trace.pretty_print(sema.db, &self.project.vfs);
+                dbg!(trace);
                 println!("{out}");
             }
         }
@@ -566,16 +568,24 @@ mod tracer {
     use std::collections::HashMap;
 
     use anyhow::{bail, Context, Result};
-    use ra_ap_hir::{Adt, HasSource, ToolModule, Type};
+    use ra_ap_hir::{
+        db::{ExpandDatabase, InternDatabase},
+        Adt, HasSource, HirFileId, InFileWrapper, ToolModule, Type,
+    };
     use ra_ap_hir_def::FieldId;
     use ra_ap_ide_db::{label, LineIndexDatabase};
     use ra_ap_syntax::{
-        ast::{self, HasName},
+        ast::{self, HasArgList, HasName},
         AstNode, SyntaxNode,
     };
     use ra_ap_vfs::{FileId, Vfs};
 
-    use crate::{entity::NamedRefPath, helper, loader::Bagua, Database, Semantics};
+    use crate::{
+        entity::NamedRefPath,
+        helper::{self, FnCall},
+        loader::Bagua,
+        Database, Semantics,
+    };
 
     #[derive(Clone, Debug)]
     pub struct ReferPath {
@@ -655,7 +665,7 @@ mod tracer {
     #[derive(Clone, Debug)]
     pub struct FnCallPoint {
         ast: ast::Expr,
-        file_id: FileId,
+        file_id: HirFileId,
         parent: Option<Box<FnCallPoint>>,
     }
 
@@ -675,15 +685,30 @@ mod tracer {
 
     #[derive(Clone, Debug)]
     pub struct LeftTraceNode {
-        pub ast: ast::Pat,
-        pub file_id: FileId,
+        pub ast: LeftTraceNodeAst,
+        pub file_id: HirFileId,
         pub trace_ctx: TraceCtx,
+    }
+
+    #[derive(Clone, Debug, derive_more::From)]
+    pub enum LeftTraceNodeAst {
+        Pat(ast::Pat),
+        SelfArg(ast::SelfParam),
+    }
+
+    impl LeftTraceNodeAst {
+        fn syntax(&self) -> &SyntaxNode {
+            match self {
+                LeftTraceNodeAst::Pat(pat) => pat.syntax(),
+                LeftTraceNodeAst::SelfArg(self_param) => self_param.syntax(),
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
     pub struct RightTraceNode {
         pub ast: ast::Expr,
-        pub file_id: FileId,
+        pub file_id: HirFileId,
         pub trace_ctx: TraceCtx,
         pub deref_triggered: bool,
     }
@@ -728,11 +753,24 @@ mod tracer {
             }
         }
         fn location(&self, db: &Database, vfs: &Vfs) -> String {
-            let file_id = self.file_id();
-            let line_index = db.line_index(file_id);
-            let line_col = line_index.line_col(self.ast().text_range().start());
+            let file_wrapper = match self {
+                TraceNode::Left(left_trace_node) => InFileWrapper::new(
+                    left_trace_node.file_id,
+                    left_trace_node.ast.syntax().clone(),
+                ),
+                TraceNode::Right(right_trace_node) => InFileWrapper::new(
+                    right_trace_node.file_id,
+                    right_trace_node.ast.syntax().clone(),
+                ),
+            };
 
-            let path = vfs.file_path(file_id);
+            dbg!(&file_wrapper);
+
+            let real = file_wrapper.original_file_range_with_macro_call_body(db);
+            let line_index = db.line_index(real.file_id.file_id());
+            let line_col = line_index.line_col(real.range.start());
+
+            let path = vfs.file_path(real.file_id.file_id());
 
             format!("{path}:{}:{}", line_col.line + 1, line_col.col + 1)
         }
@@ -744,7 +782,7 @@ mod tracer {
             }
         }
 
-        fn file_id(&self) -> FileId {
+        fn file_id(&self) -> HirFileId {
             match self {
                 TraceNode::Left(left_trace_node) => left_trace_node.file_id,
                 TraceNode::Right(right_trace_node) => right_trace_node.file_id,
@@ -773,14 +811,18 @@ mod tracer {
 
         pub fn gen_traces(self, sema: &Semantics, bagua: &Bagua) -> Result<Vec<Trace>> {
             let ident = match self.ast.clone() {
-                ast::Pat::IdentPat(ident_pat) => ident_pat,
-                ast::Pat::RecordPat(_record_pat) => {
-                    bail!("unsupported pat")
-                }
-                _ => bail!("unkown pat"),
+                LeftTraceNodeAst::Pat(pat) => match pat {
+                    ast::Pat::IdentPat(ident_pat) => {
+                        ident_pat.name().context("IdentPat without Name")?
+                    }
+                    _ => {
+                        todo!()
+                    }
+                },
+                LeftTraceNodeAst::SelfArg(self_param) => self_param.name().unwrap(),
             };
 
-            let usages = helper::usages_in_current_file(sema, &ident.name().unwrap()).unwrap();
+            let usages = helper::usages_in_current_file(sema, &ident).unwrap();
             let base_trace = Trace {
                 nodes: vec![TraceNode::Left(self.clone())],
             };
@@ -788,27 +830,28 @@ mod tracer {
             for (_, usages) in usages {
                 for usage in usages {
                     let name_ref = usage.name.as_name_ref().context("no name ref")?;
+                    let file_id = sema.hir_file_for(name_ref.syntax());
 
-                    let Some(node) = expand_group_ref_to_node(
+                    let Some(right_node) = expand_ref_to_node(
                         sema,
                         name_ref,
                         &self.trace_ctx,
                         bagua,
-                        self.file_id,
+                        file_id,
                         self.is_scalar(),
                     )?
                     else {
                         continue;
                     };
-                    let deref_triggered = node.deref_triggered;
+                    let deref_triggered = right_node.deref_triggered;
                     if deref_triggered {
                         let mut trace = base_trace.clone();
-                        trace.push(TraceNode::Right(node));
+                        trace.push(TraceNode::Right(right_node));
                         traces.push(trace);
                     } else {
-                        let mut right_nexts = vec![node];
+                        let mut right_nexts = vec![right_node];
                         loop {
-                            let next_node = right_nexts.last().unwrap().next_node(sema)?;
+                            let next_node = right_nexts.last().unwrap().next_node(sema, bagua)?;
                             if let Some(next_node) = next_node {
                                 match next_node {
                                     TraceNode::Left(left_trace_node) => {
@@ -829,8 +872,14 @@ mod tracer {
                                     TraceNode::Right(right_trace_node) => {
                                         if right_trace_node.deref_triggered {
                                             let mut trace = base_trace.clone();
+                                            let bridge_nodes = right_nexts
+                                                .into_iter()
+                                                .map(|node| TraceNode::Right(node))
+                                                .collect::<Vec<_>>();
+                                            trace.nodes.extend(bridge_nodes);
                                             trace.push(TraceNode::Right(right_trace_node));
                                             traces.push(trace);
+                                            break;
                                         } else {
                                             right_nexts.push(right_trace_node.clone());
                                         }
@@ -848,30 +897,69 @@ mod tracer {
         }
     }
 
-    fn is_returning(expr: &ast::Expr) -> Result<bool> {
-        Ok(false)
-    }
-
     impl RightTraceNode {
-        pub fn next_node(&self, sema: &Semantics) -> Result<Option<TraceNode>> {
-            // if is_returning(&self.ast)? {
-            //     let fn_call_point = self
-            //         .trace_ctx
-            //         .fn_call_point
-            //         .clone()
-            //         .context("no fn call point")?;
-            //     let mut ctx = self.trace_ctx.clone();
-            //     ctx.fn_call_point = fn_call_point.parent.map(|p| *p);
+        fn is_returning(&self, sema: &Semantics) -> Result<bool> {
+            let expr = &self.ast;
+            // let infile = InFileWrapper::new(self.file_id, self.ast.clone());
+            // let origin = infile.original_ast_node_rooted(sema.db);
+            // dbg!(origin);
 
-            //     let node = TraceNode::Right(RightTraceNode {
-            //         ast: fn_call_point.ast,
-            //         trace_ctx: ctx,
-            //         deref_triggered: false,
-            //         file_id: fn_call_point.file_id,
-            //     });
+            // // let call = sema.might_be_inside_macro_call(token)
 
-            //     return Ok(Some(node));
-            // }
+            // let Some(expr) = sema.original_syntax_node_rooted(self.ast.syntax()) else {
+            //     let m_call_id = self.file_id.macro_file().unwrap().macro_call_id;
+            //     let call = sema.db.lookup_intern_macro_call(m_call_id);
+            //     dbg!(call);
+
+            //     bail!("cannot map node to origin node: {expr:#?}");
+            // };
+            // let expr = ast::Expr::cast(expr).context("not a expr")?;
+
+            let Some(parent) = expr.syntax().parent() else {
+                todo!()
+            };
+            if ast::ReturnExpr::can_cast(parent.kind()) {
+                return Ok(true);
+            }
+
+            if ast::ExprStmt::can_cast(parent.kind()) {
+                return Ok(false);
+            }
+
+            if ast::StmtList::can_cast(parent.kind()) {
+                let grandpa = parent.parent().context("expr without parent")?;
+                if ast::BlockExpr::can_cast(grandpa.kind()) {
+                    let grandgrandpa = grandpa.parent().context("expr without parent")?;
+                    if ast::Fn::can_cast(grandgrandpa.kind()) {
+                        return Ok(true);
+                    }
+                }
+            }
+
+            Ok(false)
+        }
+
+        pub fn next_node(&self, sema: &Semantics, bagua: &Bagua) -> Result<Option<TraceNode>> {
+            if self.is_returning(sema)? {
+                let fn_call_point = self
+                    .trace_ctx
+                    .fn_call_point
+                    .clone()
+                    .context("no fn call point")?;
+                let mut ctx = self.trace_ctx.clone();
+                ctx.fn_call_point = fn_call_point.parent.map(|p| *p);
+
+                let deref_triggered = check_if_deref_triggered(sema, &fn_call_point.ast, bagua)?;
+
+                let node = TraceNode::Right(RightTraceNode {
+                    ast: fn_call_point.ast,
+                    trace_ctx: ctx,
+                    deref_triggered,
+                    file_id: fn_call_point.file_id,
+                });
+
+                return Ok(Some(node));
+            }
 
             let parent = self
                 .ast
@@ -881,13 +969,27 @@ mod tracer {
             if let Some(let_stmt) = ast::LetStmt::cast(parent.clone()) {
                 let pat = let_stmt.pat().context("no pat in let stmt")?;
                 return Ok(Some(TraceNode::Left(LeftTraceNode {
-                    ast: pat,
+                    ast: From::from(pat),
                     trace_ctx: self.trace_ctx.clone(),
                     file_id: self.file_id,
                 })));
             }
             if let Some(arg_list) = ast::ArgList::cast(parent.clone()) {
-                return self.fn_node(sema, arg_list).map(Some);
+                let index = arg_list
+                    .args()
+                    .position(|arg| arg.syntax() == self.ast.syntax())
+                    .expect("no arg match");
+                let fn_call = FnCall::try_from_arg_list(arg_list)?;
+
+                return self
+                    .next_fn_arg_node(sema, fn_call, NodeArgIndex::Index(index))
+                    .map(|n| Some(TraceNode::Left(n)));
+            }
+            if let Some(method_call) = ast::MethodCallExpr::cast(parent.clone()) {
+                let fn_call = FnCall::from_method_call(method_call);
+                return self
+                    .next_fn_arg_node(sema, fn_call, NodeArgIndex::Self_)
+                    .map(|n| Some(TraceNode::Left(n)));
             }
 
             if let Some(record_field) = ast::RecordExprField::cast(parent.clone()) {
@@ -904,39 +1006,73 @@ mod tracer {
             Ok(None)
         }
 
-        fn fn_node(
+        fn next_fn_arg_node(
             &self,
             sema: &Semantics,
-            arg_list: ast::ArgList,
-        ) -> Result<TraceNode, anyhow::Error> {
-            let index = arg_list
-                .args()
-                .position(|arg| arg.syntax() == self.ast.syntax())
-                .unwrap();
-            let fn_ref = arg_list
-                .syntax()
-                .prev_sibling()
-                .context("arg list has no prev sibling")?;
-            let fn_ref = ast::PathExpr::cast(fn_ref)
-                .with_context(|| format!("no fn ref: {:#?}", arg_list.syntax().parent()))?
-                .syntax()
-                .descendants()
-                .find_map(ast::NameRef::cast)
-                .context("no fn name ref")?;
-            let fn_ = helper::resolve_fn(sema, &fn_ref).context("no fn")?;
-            let fn_ = fn_.to_fn().context("not a fn")?;
-            let source = fn_.source(sema.db).context("fn has no source")?;
-            let params = source.value.param_list().context("fn has no param list")?;
-            let param = params.params().skip(index).next().context("no param")?;
-            let pat = param.pat().context("no pat in param")?;
+            fn_call: FnCall,
+            index: NodeArgIndex, // arg_index: usize,
+        ) -> Result<LeftTraceNode, anyhow::Error> {
+            let fn_ = fn_call.resolve(sema)?;
+            let fn_source = fn_.source(sema.db).context("fn has no source")?;
+            let _file_ast = sema.parse_or_expand(dbg!(fn_source.file_id)); // don't delete this line
+                                                                           // dbg!(_file_ast);
+            let fn_ast = fn_source.value.clone();
 
-            return Ok(TraceNode::Left(LeftTraceNode {
+            let params = fn_ast.param_list().context("fn has no param list")?;
+            dbg!(params.params().next());
+            dbg!(params.self_param());
+
+            let pat = match index {
+                NodeArgIndex::Self_ => {
+                    let p = params.self_param().context("no SelfParams")?;
+                    LeftTraceNodeAst::SelfArg(p)
+                }
+                NodeArgIndex::Index(index) => {
+                    let param = params
+                        .params()
+                        .skip(index)
+                        .next()
+                        .with_context(|| format!("no param: {:#?}", fn_source))?;
+                    let pat = param.pat().context("no pat in param")?;
+                    LeftTraceNodeAst::Pat(pat)
+                }
+            };
+            let mut trace_ctx = self.trace_ctx.clone();
+            trace_ctx.fn_call_point = Some(FnCallPoint {
+                ast: fn_call.to_expr(),
+                file_id: self.file_id,
+                parent: trace_ctx.fn_call_point.clone().map(Box::new),
+            });
+
+            return Ok(dbg!(LeftTraceNode {
                 ast: pat,
-                trace_ctx: self.trace_ctx.clone(),
-                file_id: source.file_id.file_id().unwrap().file_id(),
+                trace_ctx,
+                file_id: fn_source.file_id,
             }));
         }
     }
+
+    fn fn_call_ast(arg_list: &ast::ArgList) -> Result<ast::Expr> {
+        let parent = arg_list
+            .syntax()
+            .parent()
+            .context("arg list without parent")?;
+        if let Some(method_call) = ast::MethodCallExpr::cast(parent.clone()) {
+            return Ok(ast::Expr::MethodCallExpr(method_call));
+        }
+
+        if let Some(call_expr) = ast::CallExpr::cast(parent) {
+            return Ok(ast::Expr::CallExpr(call_expr));
+        }
+
+        bail!("no fn-call-ast found")
+    }
+
+    enum NodeArgIndex {
+        Self_,
+        Index(usize),
+    }
+
     impl AnyFieldGroup {
         fn get_field(&self, path: &ReferPath) -> Option<&AnyField> {
             self.get_field_by_segments(&path.segments)
@@ -980,11 +1116,26 @@ mod tracer {
         let ty = sema.type_of_expr(expr).context("cannot get type of expr")?;
         dbg!(&expr);
         dbg!(&ty);
-        if !is_entity_field(sema, &ty.original, bagua)? {
+
+        let original = ty.original.strip_references();
+
+        let Some(Adt::Enum(field_wrapper_ty)) = original.strip_references().as_adt() else {
+            return Ok(false);
+        };
+        let Some(adjusted) = ty.adjusted.map(|t| t.strip_references()) else {
+            return Ok(false);
+        };
+        dbg!(&original);
+        dbg!(&adjusted);
+
+        if field_wrapper_ty != bagua.struct_field {
+            return Ok(false);
+        }
+        if original == adjusted {
             return Ok(false);
         }
 
-        Ok(ty.has_adjustment())
+        Ok(true)
     }
 
     fn check_prefix_expr_deref(
@@ -1012,12 +1163,12 @@ mod tracer {
         }
     }
 
-    fn expand_group_ref_to_node(
+    fn expand_ref_to_node(
         sema: &Semantics,
         name_ref: &ast::NameRef,
         trace_ctx: &TraceCtx,
         bagua: &Bagua,
-        file_id: FileId,
+        file_id: HirFileId,
         mut is_scalar: bool,
     ) -> Result<Option<RightTraceNode>> {
         let path_expr = name_ref
@@ -1074,7 +1225,7 @@ mod tracer {
                     }
                 }
                 _ => {
-                    break;
+                    bail!("unknown right node: {:#?}", res_expr);
                 }
             }
             if is_deref {
@@ -1084,18 +1235,21 @@ mod tracer {
             let Some(parent_expr) = res_expr.syntax().parent().and_then(ast::Expr::cast) else {
                 break;
             };
+            if matches!(parent_expr, ast::Expr::MethodCallExpr(_)) {
+                break;
+            }
             dbg!(parent_expr.syntax().text());
             res_expr = parent_expr;
         }
 
-        let node = RightTraceNode {
+        let right_node = RightTraceNode {
             ast: res_expr,
             trace_ctx,
             deref_triggered: is_deref,
             file_id,
         };
-        dbg!(&node);
+        dbg!(&right_node);
 
-        Ok(Some(node))
+        Ok(Some(right_node))
     }
 }

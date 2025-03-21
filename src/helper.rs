@@ -1,4 +1,5 @@
-use ra_ap_hir::{Function, ModuleDef, Variant};
+use anyhow::{bail, Context};
+use ra_ap_hir::{Function, ModuleDef, ToolModule, Variant};
 use ra_ap_hir_def::hir;
 use ra_ap_ide::SearchScope;
 use ra_ap_ide_db::{
@@ -6,7 +7,10 @@ use ra_ap_ide_db::{
     search::UsageSearchResult,
 };
 use ra_ap_span::EditionedFileId;
-use ra_ap_syntax::{ast, ted, AstNode, SyntaxNode, SyntaxToken};
+use ra_ap_syntax::{
+    ast::{self, HasArgList},
+    ted, AstNode, SyntaxNode, SyntaxToken,
+};
 
 use crate::{loader::Bagua, Semantics};
 
@@ -61,11 +65,11 @@ pub fn is_method_call_of_find(sema: &Semantics, token: &SyntaxToken, bagua: &Bag
 
 pub fn usages_in_current_file(sema: &Semantics, name: &ast::Name) -> Option<UsageSearchResult> {
     if let Some(NameClass::Definition(def)) = NameClass::classify(sema, &name) {
-        let file_id = sema.hir_file_for(&name.syntax()).file_id().unwrap();
+        // let file_id = sema.hir_file_for(&name.syntax()).file_id().unwrap();
 
         let usages = def
             .usages(sema)
-            .in_scope(&SearchScope::single_file(file_id))
+            // .in_scope(&SearchScope::single_file(file_id))
             .all();
         return Some(usages);
     }
@@ -111,4 +115,70 @@ pub fn resolve_fn(sema: &Semantics, name_ref: &ast::NameRef) -> Option<FunctionL
     }
 
     None
+}
+
+pub enum FnCall {
+    CallExpr(ast::CallExpr),
+    MethodCall(ast::MethodCallExpr),
+}
+
+impl FnCall {
+    pub fn from_method_call(m: ast::MethodCallExpr) -> Self {
+        Self::MethodCall(m)
+    }
+
+    pub fn try_from_arg_list(arg_list: ast::ArgList) -> anyhow::Result<Self> {
+        let parent = arg_list
+            .syntax()
+            .parent()
+            .context("ArgList without parent")?;
+        if let Some(method_call) = ast::MethodCallExpr::cast(parent.clone()) {
+            return Ok(Self::MethodCall(method_call));
+        }
+
+        if let Some(method_call) = ast::CallExpr::cast(parent) {
+            return Ok(Self::CallExpr(method_call));
+        }
+
+        bail!("not a function call")
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            FnCall::CallExpr(call_expr) => call_expr.syntax(),
+            FnCall::MethodCall(method_call_expr) => method_call_expr.syntax(),
+        }
+    }
+
+    pub fn to_expr(self) -> ast::Expr {
+        match self {
+            FnCall::CallExpr(call_expr) => ast::Expr::CallExpr(call_expr),
+            FnCall::MethodCall(method_call_expr) => ast::Expr::MethodCallExpr(method_call_expr),
+        }
+    }
+
+    pub fn resolve(&self, sema: &Semantics) -> anyhow::Result<Function> {
+        match self {
+            FnCall::CallExpr(call_expr) => {
+                let path_expr = call_expr
+                    .syntax()
+                    .first_child()
+                    .context("call_expr without the first child")?;
+                let path_expr = ast::PathExpr::cast(path_expr).context("not a PathExpr")?;
+                let path = path_expr.path().context("a PathExpr without path")?;
+                let resolution = sema.resolve_path(&path).context("cannot resolve fn path")?;
+                match resolution {
+                    ra_ap_hir::PathResolution::Def(ModuleDef::Function(fn_)) => {
+                        return Ok(fn_);
+                    }
+                    _ => bail!("not a fn"),
+                }
+            }
+            FnCall::MethodCall(method_call_expr) => {
+                return sema
+                    .resolve_method_call(method_call_expr)
+                    .context("cannot resolve fn");
+            }
+        };
+    }
 }

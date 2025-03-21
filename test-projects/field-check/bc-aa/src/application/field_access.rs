@@ -9,7 +9,12 @@ use bagua::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::domain::aa::{AAId, AAReadOnly, AAWithName, AAWithOnlyId, BBId, MyString, AA};
+use crate::{
+    domain::aa::{AAId, AAReadOnly, AAWithName, AAWithOnlyId, BBId, MyString, AA},
+    output,
+};
+
+use super::{This, ThisField};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,34 +63,6 @@ where
 
         todo!()
     }
-}
-
-fn simple_access(entity: &mut AA) {
-    let name = &&*&*&entity.name;
-    let name = name;
-    let name_: &MyString = &&*&name;
-    let name_len: usize = name.len();
-
-    // let group = &entity.group;
-    // let group = group;
-    // let g1: &u32 = &group.g1;
-
-    // let _: &MyString = entity.name.this(); // panic
-    // let _: usize = entity.name.len(); // panic
-    // let _: usize = entity.name.inner.len(); // panic
-    // let _: &u32 = &entity.group.g1; // panic
-
-    // let _: &MyString = &(&entity.name); // panic
-    // let _: u32 = *(&entity.group).g1; // panic
-    //
-    //
-    // let _: &u32 = &super::identity(&entity.group).this().g1; // panic
-    // let _: &String = &entity.get_group().g2; // panic
-    // let _: &String = &entity.get_group().get_g2(); // panic
-
-    // entity.set_name("name1".to_string()); // ok
-    // entity.set_g1(1); // ok
-    // entity.set_name_if_empty("name2".to_string()); // panic
 }
 
 struct BB<'a, T> {
@@ -138,7 +115,7 @@ fn access(entity: &mut AA) -> &MyString {
     let bb_g1: u32 = **&bb.gp.g1;
     let bb_g1: &u32 = *&&bb.gp.g1;
 
-    let _: &MyString = entity.name.this(); // panic
+    let _: &MyString = entity.name.this_ref(); // panic
     let _: usize = entity.name.len(); // panic
     let _: usize = entity.name.inner.len(); // panic
     let _: &u32 = &entity.group.g1; // panic
@@ -147,6 +124,7 @@ fn access(entity: &mut AA) -> &MyString {
     let _: &MyString = &(&entity.name); // panic
     let _: u32 = *(&entity.group).g1; // panic
     let _: &u32 = &super::identity(&entity.group).this().g1; // panic
+    let _: &u32 = &crate::application::aa::identity(&entity.group).this().g1; // panic
     let _: &String = &entity.get_group().g2; // panic
     let _: &String = &entity.get_group().get_g2(); // panic
 
@@ -181,10 +159,35 @@ fn access(entity: &mut AA) -> &MyString {
     (&entity.name)
 }
 
-trait This {
-    fn this(&self) -> &Self {
-        self
-    }
-}
+fn simple_access(entity: &mut AA) {
+    let name = &&*&*&entity.name;
+    let name: &&Field<MyString> = name;
+    // let name_: &MyString = &&*&name;
+    // let name_len: usize = name.len();
 
-impl<T> This for T {}
+    // let name_len: usize = name.this().len();
+    let this_name: &&Field<MyString> = name.this();
+    output!(this_name.len());
+    // let name_len: usize = name.this_field().len();
+
+    // let group = &entity.group;
+    // let group = group;
+    // let g1: &u32 = &group.g1;
+
+    // let _: &MyString = entity.name.this(); // panic
+    // let _: usize = entity.name.len(); // panic
+    // let _: usize = entity.name.inner.len(); // panic
+    // let _: &u32 = &entity.group.g1; // panic
+
+    // let _: &MyString = &(&entity.name); // panic
+    // let _: u32 = *(&entity.group).g1; // panic
+    //
+    //
+    // let _: &u32 = &super::identity(&entity.group).this().g1; // panic
+    // let _: &String = &entity.get_group().g2; // panic
+    // let _: &String = &entity.get_group().get_g2(); // panic
+
+    // entity.set_name("name1".to_string()); // ok
+    // entity.set_g1(1); // ok
+    // entity.set_name_if_empty("name2".to_string()); // panic
+}
