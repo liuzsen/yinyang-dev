@@ -1,5 +1,5 @@
-use anyhow::{bail, Context};
-use ra_ap_hir::{Function, ModuleDef, ToolModule, Variant};
+use anyhow::{bail, Context, Result};
+use ra_ap_hir::{Function, MacroFileId, ModuleDef, ToolModule, Variant};
 use ra_ap_hir_def::hir;
 use ra_ap_ide::SearchScope;
 use ra_ap_ide_db::{
@@ -9,15 +9,20 @@ use ra_ap_ide_db::{
 use ra_ap_span::EditionedFileId;
 use ra_ap_syntax::{
     ast::{self, HasArgList},
-    ted, AstNode, SyntaxNode, SyntaxToken,
+    ted, AstNode, SyntaxKind, SyntaxNode, SyntaxToken,
 };
 
-use crate::{loader::Bagua, Semantics};
+use crate::{loader::Bagua, Database, Semantics};
 
-fn expand_macro_recur(sema: &Semantics, macro_call: &ast::MacroCall) -> Option<SyntaxNode> {
-    let expanded = sema.expand(macro_call)?.clone_for_update();
-    expand(sema, expanded, ast::MacroCall::cast, expand_macro_recur)
-}
+// fn expand_macro_recur(sema: &Semantics, macro_call: &ast::MacroCall) -> Option<SyntaxNode> {
+//     let expanded = sema
+//         .expand(MacroFileId {
+//             macro_call_id: macro_call,
+//         })
+//         .value
+//         .clone_for_update();
+//     expand(sema, expanded, ast::MacroCall::cast, expand_macro_recur)
+// }
 
 fn expand<T: AstNode>(
     sema: &Semantics,
@@ -53,7 +58,7 @@ pub fn is_method_call_of_find(sema: &Semantics, token: &SyntaxToken, bagua: &Bag
     ) -> Option<bool> {
         let name_ref = token.parent_ancestors().find_map(ast::NameRef::cast)?;
         let name_ref_class = NameRefClass::classify(sema, &name_ref)?;
-        if let NameRefClass::Definition(Definition::Function(function)) = name_ref_class {
+        if let NameRefClass::Definition(Definition::Function(function), substits) = name_ref_class {
             let is_method_find = function == bagua.repository_trait.method_find(sema.db)?;
             return Some(is_method_find);
         }
@@ -180,5 +185,180 @@ impl FnCall {
                     .context("cannot resolve fn");
             }
         };
+    }
+}
+
+pub fn is_returning(sema: &Semantics, expr: ast::Expr) -> Result<bool> {
+    use SyntaxKind::*;
+
+    let ancestors = sema.ancestors_with_macros(expr.syntax().clone());
+    for anc in ancestors {
+        let kind = anc.kind();
+        if matches!(kind, SyntaxKind::LET_STMT) {
+            return Ok(false);
+        }
+        if matches!(kind, SyntaxKind::FN) {
+            return Ok(true);
+        }
+        if kind == SyntaxKind::RETURN_EXPR {
+            return Ok(true);
+        }
+        if matches!(kind, MATCH_ARM | MATCH_ARM_LIST | STMT_LIST | MACRO_CALL) {
+            continue;
+        }
+
+        if let Some(expr_stmt) = ast::ExprStmt::cast(anc.clone()) {
+            let first_child = expr_stmt.syntax().first_child().unwrap();
+            if first_child.kind() == SyntaxKind::BREAK_EXPR {
+                continue;
+            } else {
+                return Ok(false);
+            }
+        }
+
+        if !ast::Expr::can_cast(kind) {
+            return Ok(false);
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use ra_ap_ide::RootDatabase;
+    use ra_ap_syntax::{ast, AstNode};
+    use ra_ap_test_fixture::WithFixture;
+
+    use crate::Semantics;
+
+    #[test]
+    fn test_is_returning() {
+        assert!(check_if_returning(returning_case_1()));
+        assert!(check_if_returning(returning_case_2()));
+        assert!(check_if_returning(returning_case_3()));
+        assert!(check_if_returning(loop_break()));
+        assert!(!check_if_returning(not_returning()));
+    }
+
+    fn check_if_returning(code: &str) -> bool {
+        let (db, file_id, selection) = RootDatabase::with_range_or_offset(code);
+        let sema = Semantics::new(&db);
+        let file = sema.parse(ra_ap_base_db::EditionedFileId::new(&db, file_id));
+        dbg!(&file);
+        let token = file
+            .syntax()
+            .covering_element(dbg!(selection.expect_range()));
+        let token = sema.descend_into_macros_no_opaque(token.into_token().unwrap())[0].clone();
+        let expr = token.parent_ancestors().find_map(ast::Expr::cast).unwrap();
+        super::is_returning(&sema, expr).unwrap()
+    }
+
+    fn loop_break() -> &'static str {
+        r#"
+fn aa() -> u8 {
+    loop {
+        break $02$0;
+    }
+}
+        "#
+    }
+
+    fn not_returning() -> &'static str {
+        r#"
+fn bb() -> &'static str {
+    let a = "";
+
+    $0a$0;
+    todo!()
+}
+        "#
+    }
+
+    fn returning_case_3() -> &'static str {
+        r#"
+macro_rules! echo {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+fn bb() -> &'static str {
+    let a = "";
+
+    a;
+
+    match true {
+        true => echo!(a),
+        false => {
+            if true {
+                {
+                    a
+                }
+            } else {
+                return { $0a$0 };
+            }
+        }
+    }
+}
+        "#
+    }
+
+    fn returning_case_2() -> &'static str {
+        r#"
+macro_rules! echo {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+fn bb() -> &'static str {
+    let a = "";
+
+    a;
+
+    match true {
+        true => echo!(a),
+        false => {
+            if true {
+                {
+                    $0a$0
+                }
+            } else {
+                return { a };
+            }
+        }
+    }
+}
+        "#
+    }
+
+    fn returning_case_1() -> &'static str {
+        r#"
+macro_rules! echo {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+fn bb() -> &'static str {
+    let a = "";
+
+    a;
+
+    match true {
+        true => echo!($0a$0),
+        false => {
+            if true {
+                {
+                    a
+                }
+            } else {
+                return { a };
+            }
+        }
+    }
+}
+        "#
     }
 }

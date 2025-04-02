@@ -12,13 +12,13 @@ pub mod aa {
 }
 
 #[macro_export]
-macro_rules! output {
+macro_rules! same {
     ($($tt:tt)*) => {
         $($tt)*
     };
 }
 
-output! {
+same! {
 trait This: Sized {
     fn this(self) -> Self {
         self

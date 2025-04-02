@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::aa::{AAId, AAReadOnly, AAWithName, AAWithOnlyId, BBId, MyString, AA},
-    output,
+    same,
 };
 
 use super::{This, ThisField};
@@ -156,7 +156,54 @@ fn access(entity: &mut AA) -> &MyString {
         return &entity.name;
     }
 
-    (&entity.name)
+    if true {
+        match true {
+            true => (&entity.name),
+            false => (&entity.name),
+        }
+    } else {
+        if true {
+            return &entity.name;
+        } else {
+            same!(&(&entity.name))
+        }
+    }
+}
+
+macro_rules! echo {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+fn aa() -> u8 {
+    loop {
+        continue;
+        return 0;
+        return 1;
+    }
+    loop {
+        break 2;
+    }
+}
+
+fn bb() -> &'static str {
+    let a = "";
+
+    a;
+
+    match true {
+        true => echo!(a),
+        false => {
+            if true {
+                {
+                    a
+                }
+            } else {
+                return { a };
+            }
+        }
+    }
 }
 
 fn simple_access(entity: &mut AA) {
@@ -167,12 +214,12 @@ fn simple_access(entity: &mut AA) {
 
     // let name_len: usize = name.this().len();
     let this_name: &&Field<MyString> = name.this();
-    output!(this_name.len());
+    same!(this_name.len());
     // let name_len: usize = name.this_field().len();
 
-    // let group = &entity.group;
-    // let group = group;
-    // let g1: &u32 = &group.g1;
+    let group = &entity.group;
+    let group = group;
+    let g1: &u32 = &group.g1;
 
     // let _: &MyString = entity.name.this(); // panic
     // let _: usize = entity.name.len(); // panic

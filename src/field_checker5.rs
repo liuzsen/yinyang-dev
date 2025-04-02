@@ -157,6 +157,7 @@ impl<'a> FieldChecker<'a> {
             .module
             .as_source_file_id(&self.project.db)
             .context("uc module not found")?;
+        let file_id = ra_ap_base_db::EditionedFileId::new(sema.db, file_id);
         let file_ast = sema.parse(file_id);
         dbg!(&file_ast);
 
@@ -173,13 +174,13 @@ impl<'a> FieldChecker<'a> {
                     path_in_entity: NamedRefPath::new_this(),
                     fn_call_point: None,
                 },
-                file_id: HirFileId::from(file_id),
+                file_id: HirFileId::from(file_id.editioned_file_id(sema.db)),
             };
             let traces = init_node.gen_traces(&sema, &self.project.bagua)?;
 
             for trace in traces {
                 let out = trace.pretty_print(sema.db, &self.project.vfs);
-                dbg!(trace);
+                // dbg!(trace);
                 println!("{out}");
             }
         }
@@ -304,9 +305,10 @@ impl<'a> FieldChecker<'a> {
                 if let TyKind::Adt(adt_id, _) = ty_data.kind {
                     let id = adt_id.0;
                     let struct_id = match id {
-                        ra_ap_hir::AdtId::StructId(struct_id) => struct_id,
+                        ra_ap_hir_def::AdtId::StructId(struct_id) => struct_id,
                         _ => return None,
                     };
+
                     let struct_def = Struct::from(struct_id);
                     // dbg!(struct_def.source(sema.db));
                     return Some((pat, struct_def));
@@ -448,7 +450,8 @@ impl FieldGroup {
             .original_ast_node_rooted(sema.db)
             .context("entity source not found")?;
         let struct_name = origin_ast.value.name().context("entity name not found")?;
-        let origin_file = sema.parse(origin_ast.file_id);
+        let file_id = ra_ap_base_db::EditionedFileId::new(sema.db, origin_ast.file_id);
+        let origin_file = sema.parse(file_id);
         let struct_ast = origin_file
             .syntax()
             .descendants()
@@ -569,8 +572,7 @@ mod tracer {
 
     use anyhow::{bail, Context, Result};
     use ra_ap_hir::{
-        db::{ExpandDatabase, InternDatabase},
-        Adt, HasSource, HirFileId, InFileWrapper, ToolModule, Type,
+        db::ExpandDatabase, Adt, HasSource, HirFileId, InFileWrapper, ToolModule, Type,
     };
     use ra_ap_hir_def::FieldId;
     use ra_ap_ide_db::{label, LineIndexDatabase};
@@ -714,20 +716,12 @@ mod tracer {
     }
 
     impl TraceCtx {
-        fn get_tracing_field(&self) -> Option<&AnyField> {
-            self.scope.get_field(&self.path_in_scope)
+        fn get_tracing_field(&self) -> Option<AnyField> {
+            self.scope.get(&self.path_in_scope)
         }
 
         fn is_self(&self) -> bool {
             self.path_in_entity.is_this()
-        }
-
-        fn is_entity_self(&self) -> bool {
-            if self.path_in_entity.is_this() {
-                assert!(self.path_in_scope.is_this());
-                return true;
-            }
-            false
         }
     }
 
@@ -781,13 +775,6 @@ mod tracer {
                 TraceNode::Right(right_trace_node) => right_trace_node.ast.syntax(),
             }
         }
-
-        fn file_id(&self) -> HirFileId {
-            match self {
-                TraceNode::Left(left_trace_node) => left_trace_node.file_id,
-                TraceNode::Right(right_trace_node) => right_trace_node.file_id,
-            }
-        }
     }
 
     impl AnyField {
@@ -816,7 +803,7 @@ mod tracer {
                         ident_pat.name().context("IdentPat without Name")?
                     }
                     _ => {
-                        todo!()
+                        bail!("pat not supported yet. {:#?}", self.ast)
                     }
                 },
                 LeftTraceNodeAst::SelfArg(self_param) => self_param.name().unwrap(),
@@ -899,66 +886,34 @@ mod tracer {
 
     impl RightTraceNode {
         fn is_returning(&self, sema: &Semantics) -> Result<bool> {
-            let expr = &self.ast;
-            // let infile = InFileWrapper::new(self.file_id, self.ast.clone());
-            // let origin = infile.original_ast_node_rooted(sema.db);
-            // dbg!(origin);
+            helper::is_returning(sema, self.ast.clone())
+        }
 
-            // // let call = sema.might_be_inside_macro_call(token)
+        fn caller_node(&self, sema: &Semantics, bagua: &Bagua) -> Result<RightTraceNode> {
+            let fn_call_point = self
+                .trace_ctx
+                .fn_call_point
+                .clone()
+                .context("no fn call point")?;
+            let mut ctx = self.trace_ctx.clone();
+            ctx.fn_call_point = fn_call_point.parent.map(|p| *p);
 
-            // let Some(expr) = sema.original_syntax_node_rooted(self.ast.syntax()) else {
-            //     let m_call_id = self.file_id.macro_file().unwrap().macro_call_id;
-            //     let call = sema.db.lookup_intern_macro_call(m_call_id);
-            //     dbg!(call);
-
-            //     bail!("cannot map node to origin node: {expr:#?}");
-            // };
-            // let expr = ast::Expr::cast(expr).context("not a expr")?;
-
-            let Some(parent) = expr.syntax().parent() else {
-                todo!()
+            let deref_triggered = check_if_deref_triggered(sema, &fn_call_point.ast, bagua)?;
+            let node = RightTraceNode {
+                ast: fn_call_point.ast,
+                trace_ctx: ctx,
+                deref_triggered,
+                file_id: fn_call_point.file_id,
             };
-            if ast::ReturnExpr::can_cast(parent.kind()) {
-                return Ok(true);
-            }
 
-            if ast::ExprStmt::can_cast(parent.kind()) {
-                return Ok(false);
-            }
-
-            if ast::StmtList::can_cast(parent.kind()) {
-                let grandpa = parent.parent().context("expr without parent")?;
-                if ast::BlockExpr::can_cast(grandpa.kind()) {
-                    let grandgrandpa = grandpa.parent().context("expr without parent")?;
-                    if ast::Fn::can_cast(grandgrandpa.kind()) {
-                        return Ok(true);
-                    }
-                }
-            }
-
-            Ok(false)
+            Ok(node)
         }
 
         pub fn next_node(&self, sema: &Semantics, bagua: &Bagua) -> Result<Option<TraceNode>> {
             if self.is_returning(sema)? {
-                let fn_call_point = self
-                    .trace_ctx
-                    .fn_call_point
-                    .clone()
-                    .context("no fn call point")?;
-                let mut ctx = self.trace_ctx.clone();
-                ctx.fn_call_point = fn_call_point.parent.map(|p| *p);
-
-                let deref_triggered = check_if_deref_triggered(sema, &fn_call_point.ast, bagua)?;
-
-                let node = TraceNode::Right(RightTraceNode {
-                    ast: fn_call_point.ast,
-                    trace_ctx: ctx,
-                    deref_triggered,
-                    file_id: fn_call_point.file_id,
-                });
-
-                return Ok(Some(node));
+                return self
+                    .caller_node(sema, bagua)
+                    .map(|n| Some(TraceNode::Right(n)));
             }
 
             let parent = self
@@ -974,6 +929,7 @@ mod tracer {
                     file_id: self.file_id,
                 })));
             }
+
             if let Some(arg_list) = ast::ArgList::cast(parent.clone()) {
                 let index = arg_list
                     .args()
@@ -982,40 +938,40 @@ mod tracer {
                 let fn_call = FnCall::try_from_arg_list(arg_list)?;
 
                 return self
-                    .next_fn_arg_node(sema, fn_call, NodeArgIndex::Index(index))
+                    .fn_arg_node(sema, fn_call, NodeArgIndex::Index(index))
                     .map(|n| Some(TraceNode::Left(n)));
             }
             if let Some(method_call) = ast::MethodCallExpr::cast(parent.clone()) {
                 let fn_call = FnCall::from_method_call(method_call);
                 return self
-                    .next_fn_arg_node(sema, fn_call, NodeArgIndex::Self_)
+                    .fn_arg_node(sema, fn_call, NodeArgIndex::Self_)
                     .map(|n| Some(TraceNode::Left(n)));
             }
 
-            if let Some(record_field) = ast::RecordExprField::cast(parent.clone()) {
+            if let Some(_record_field) = ast::RecordExprField::cast(parent.clone()) {
                 bail!("record_field not supported yet")
             }
 
-            if let Some(match_expr) = ast::MatchExpr::cast(parent.clone()) {
-                return Ok(None);
+            if let Some(_match_expr) = ast::MatchExpr::cast(parent.clone()) {
+                bail!("match_expr not supported yet")
             }
-            if let Some(let_expr) = ast::LetExpr::cast(parent.clone()) {
-                return Ok(None);
+            if let Some(_let_expr) = ast::LetExpr::cast(parent.clone()) {
+                bail!("let_expr not supported yet")
             }
 
             Ok(None)
         }
 
-        fn next_fn_arg_node(
+        fn fn_arg_node(
             &self,
             sema: &Semantics,
             fn_call: FnCall,
-            index: NodeArgIndex, // arg_index: usize,
+            index: NodeArgIndex,
         ) -> Result<LeftTraceNode, anyhow::Error> {
             let fn_ = fn_call.resolve(sema)?;
             let fn_source = fn_.source(sema.db).context("fn has no source")?;
             let _file_ast = sema.parse_or_expand(dbg!(fn_source.file_id)); // don't delete this line
-                                                                           // dbg!(_file_ast);
+
             let fn_ast = fn_source.value.clone();
 
             let params = fn_ast.param_list().context("fn has no param list")?;
@@ -1052,30 +1008,18 @@ mod tracer {
         }
     }
 
-    fn fn_call_ast(arg_list: &ast::ArgList) -> Result<ast::Expr> {
-        let parent = arg_list
-            .syntax()
-            .parent()
-            .context("arg list without parent")?;
-        if let Some(method_call) = ast::MethodCallExpr::cast(parent.clone()) {
-            return Ok(ast::Expr::MethodCallExpr(method_call));
-        }
-
-        if let Some(call_expr) = ast::CallExpr::cast(parent) {
-            return Ok(ast::Expr::CallExpr(call_expr));
-        }
-
-        bail!("no fn-call-ast found")
-    }
-
     enum NodeArgIndex {
         Self_,
         Index(usize),
     }
 
     impl AnyFieldGroup {
-        fn get_field(&self, path: &ReferPath) -> Option<&AnyField> {
-            self.get_field_by_segments(&path.segments)
+        fn get(&self, path: &ReferPath) -> Option<AnyField> {
+            if path.is_this() {
+                return Some(AnyField::GroupField(self.clone()));
+            } else {
+                self.get_field_by_segments(&path.segments).map(Clone::clone)
+            }
         }
 
         fn get_field_by_segments(&self, segments: &[ReferSegment]) -> Option<&AnyField> {

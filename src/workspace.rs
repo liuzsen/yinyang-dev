@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
+use ra_ap_base_db::RootQueryDb;
 use ra_ap_hir::{
     db::{DefDatabase, ExpandDatabase, HirDatabase},
     Crate, HasSource, HirDisplay, HirFileId, Impl, Module, Name, Semantics, Trait, TypeInfo,
@@ -11,7 +12,8 @@ use ra_ap_hir::{
 use ra_ap_ide::{AnalysisHost, RootDatabase};
 use ra_ap_ide_db::{base_db::SourceDatabase, defs::IdentClass};
 use ra_ap_load_cargo::LoadCargoConfig;
-use ra_ap_proc_macro_api::ProcMacroServer;
+use ra_ap_proc_macro_api::ProcMacroClient;
+// use ra_ap_proc_macro_api::ProcMacroServer;
 use ra_ap_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, RustLibSource};
 use ra_ap_span::EditionedFileId;
 use ra_ap_syntax::{ast::{self, HasName}, syntax_editor::Element, AstNode};
@@ -21,7 +23,7 @@ pub struct Workspace {
     pub root_crate: Crate,
     pub host: AnalysisHost,
     pub vfs: Vfs,
-    pub proc_macro: ProcMacroServer,
+    pub proc_macro: ProcMacroClient,
 }
 
 impl Workspace {
@@ -39,7 +41,7 @@ impl Workspace {
         let mut workspace = ProjectWorkspace::load(manifest.clone(), &cargo_config, no_progress)?;
 
         let root_krate_name = match &workspace.kind{
-            ra_ap_project_model::ProjectWorkspaceKind::Cargo { cargo, error, build_scripts, rustc, cargo_config_extra_env, set_test } => {
+            ra_ap_project_model::ProjectWorkspaceKind::Cargo { cargo, error, build_scripts, rustc, } => {
                 let crates = cargo.packages().collect::<Vec<_>>();
                 crates.iter().find_map(|k| {
                     let krate = &cargo[*k];
@@ -51,7 +53,7 @@ impl Workspace {
                 })
             },
             ra_ap_project_model::ProjectWorkspaceKind::Json(project_json) => todo!(),
-            ra_ap_project_model::ProjectWorkspaceKind::DetachedFile { file, cargo, cargo_config_extra_env, set_test } => todo!(),
+            ra_ap_project_model::ProjectWorkspaceKind::DetachedFile { file, cargo, } => todo!(),
         };
         let root_krate_name = root_krate_name.unwrap();
 
@@ -77,14 +79,16 @@ impl Workspace {
         println!("load workspace: {:?}", now.elapsed());
 
         let now = Instant::now();
-        let crate_graph = db.crate_graph();
+        let crate_graph = db.all_crates();
+
         let root_krate = crate_graph.iter().find_map(|id| {
-            let krate = &crate_graph[id];
-            match &krate.origin {
+            let krate = id.clone();
+            // let krate = &crate_graph[id];
+            match &krate.data(&db).origin {
                 ra_ap_base_db::CrateOrigin::Local { repo, name } => {
                     let name = name.as_ref().map(|n| {n.as_str()});
                     if name == Some(&root_krate_name) {
-                        Some(Crate::from(id))
+                        Some(Crate::from(krate))
                     } else {
                         None
                     }
@@ -106,12 +110,14 @@ impl Workspace {
 
     pub fn bounded_contexts(&self) -> anyhow::Result<Vec<BoundedContext>> {
         let db = self.host.raw_database();
-        let graph = db.crate_graph();
-        let crates = graph.iter();
+        // let graph = db.crate_graph();
+        // let crates = graph.iter();
+        let crates = db.all_crates();
 
         let mut bcs = vec![];
-        for krate_id in crates {
-            let krate = ra_ap_hir::Crate::from(krate_id);
+        for krate_id in crates.into_iter() {
+            let krate = ra_ap_hir::Crate::from(krate_id.clone());
+
             if krate.origin(db).is_local() {
                 let crate_display_name = krate.display_name(db).unwrap();
                 dbg!(&crate_display_name);
@@ -145,11 +151,13 @@ pub struct BoundedContext {
 
 pub fn bagua_entity_trait(host: &AnalysisHost) -> anyhow::Result<Trait> {
     let db = host.raw_database();
-    let graph = db.crate_graph();
-    let crates = graph.iter();
+    // let graph = db.crate_graph();
+    // let crates = graph.iter();
+    let crates = db.all_crates();
 
-    for krate_id in crates {
-        let krate = ra_ap_hir::Crate::from(krate_id);
+    for krate_id in crates.into_iter() {
+        let krate = ra_ap_hir::Crate::from(krate_id.clone());
+
         let display_name = krate.display_name(db).unwrap();
         if display_name.canonical_name().as_str().contains("bagua") {
             let modules = krate.modules(db);
@@ -180,17 +188,25 @@ pub fn bagua_entity_trait(host: &AnalysisHost) -> anyhow::Result<Trait> {
 
 pub fn bagua_usecase_trait(host: &AnalysisHost) -> anyhow::Result<Trait> {
     let db = host.raw_database();
-    let graph = db.crate_graph();
-    let crates = graph.iter();
+    let crates = db.all_crates();
 
     // 遍历所有 crate
-    for krate_id in crates {
-        let display_name = graph[krate_id].display_name.as_ref();
+    for krate_id in crates.into_iter() {
+        let krate = ra_ap_hir::Crate::from(krate_id.clone());
+        let display_name = match krate.origin(db) {
+            ra_ap_base_db::CrateOrigin::Rustc { name } => todo!(),
+            ra_ap_base_db::CrateOrigin::Local { repo, name } => todo!(),
+            ra_ap_base_db::CrateOrigin::Library { repo, name } => {
+                Some(name)
+            },
+            ra_ap_base_db::CrateOrigin::Lang(lang_crate_origin) => todo!(),
+        };
+        // let display_name = graph[krate_id].display_name.as_ref();
 
         // 找到 bagua crate
         if let Some(krate_name) = display_name {
-            if krate_name.canonical_name().as_str().contains("bagua") {
-                let krate = ra_ap_hir::Crate::from(krate_id);
+            if krate_name.as_str().contains("bagua") {
+                let krate = ra_ap_hir::Crate::from(krate_id.clone());
 
                 let modules = krate.modules(db);
 
@@ -307,11 +323,12 @@ impl UseCase {
         let mut entities = Vec::new();
 
         let semantics = Semantics::new(db);
-        let file_id = vfs
+        let (file_id, _) = vfs
             .file_id(&VfsPath::new_real_path(dbg!(self.path.to_string())))
             .unwrap();
+
         let file_id = EditionedFileId::current_edition(file_id);
-        let source_file = semantics.parse(file_id);
+        let source_file = semantics.parse(ra_ap_base_db::EditionedFileId::new(db, file_id));
         let impl_ = source_file
             .syntax()
             .children()
@@ -367,32 +384,6 @@ impl UseCase {
     }
 }
 
-fn repository_trait_def(semantics: &Semantics<'_, RootDatabase>, root_mod: Module) -> ra_ap_hir::Trait {
-    let db = semantics.db;
-    use ra_ap_base_db::FileLoader;
-    let id = root_mod.definition_source_file_id(db).file_id().unwrap().file_id();
-    let bagua = db.resolve_path(AnchoredPath {
-        anchor: id,
-        path: "::bagua::repository::Repository",
-    }).unwrap();
-    let file = db.parse(EditionedFileId::current_edition(bagua));   
-    let file = file.tree();
-    
-    let sema = Semantics::new(db);
-    let module = sema.to_def(&file).unwrap();
-    
-    let trait_ = module.declarations(db).into_iter().find_map(|d| {
-        if let ra_ap_hir::ModuleDef::Trait(trait_) = d {
-            if trait_.name(db).as_str() == "Repository" {
-                return Some(trait_);
-            }
-        }
-        None
-    }).unwrap();
-
-
-    trait_
-}
 
 fn analyze_repository_find(
     expr: &ast::Expr,
@@ -428,7 +419,7 @@ fn analyze_repository_find(
                     dbg!(&find_method_syn_node);
 
                     let defs = IdentClass::classify_node(semantics, &find_method_syn_node)?.definitions();
-                    for def in defs {
+                    for (def, subs) in defs {
                         dbg!(&def); 
                         let module = def.module(semantics.db).unwrap();
                         dbg!(module.name(semantics.db));

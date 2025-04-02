@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use ra_ap_base_db::SourceDatabase;
+use ra_ap_base_db::{EditionedFileId, RootQueryDb, SourceDatabase};
 use ra_ap_hir::{
     db::{DefDatabase, HirDatabase},
     Crate, HasSource, ModPath, Module, Name, PathKind, Semantics, Struct, Trait, TraitRef,
@@ -12,7 +12,7 @@ use ra_ap_hir_ty::{Interner, TyBuilder};
 use ra_ap_ide::{AnalysisHost, RootDatabase, TryToNav};
 use ra_ap_ide_db::defs::IdentClass;
 use ra_ap_paths::Utf8Path;
-use ra_ap_span::SyntaxContextId;
+use ra_ap_span::{SyntaxContext};
 use ra_ap_syntax::{
     ast::{self, edit::AstNodeEdit, HasGenericParams, HasName, HasTypeBounds},
     ted, AstNode, SyntaxNode,
@@ -43,13 +43,13 @@ macro_rules! ra_path {
         {
             use ra_ap_hir_expand::name::Name;
             use ra_ap_hir_expand::mod_path::ModPath;
-            use ra_ap_span::SyntaxContextId;
+            use ra_ap_span::SyntaxContext;
 
             ModPath::from_segments(
                 $kind,
                 vec![
-                    Name::new(stringify!($start), SyntaxContextId::from_u32(1)),
-                    $(Name::new(stringify!($seg), SyntaxContextId::from_u32(1)),)*
+                    Name::new(stringify!($start), SyntaxContext::from_u32(1)),
+                    $(Name::new(stringify!($seg), SyntaxContext::from_u32(1)),)*
                 ],
             )
         }
@@ -92,7 +92,14 @@ pub fn parse_find() -> Result<()> {
     let resolver = bc_user_crate.root_module().id().resolver(db);
     timer_end!(start, "resolve bc_user_crate");
 
-    let app_mod_path = crate_path!(application);
+    let app_mod_path = {
+    {
+    use ra_ap_hir_expand::name::Name;
+    use ra_ap_hir_expand::mod_path::ModPath;
+    // use ra_ap_span::SyntaxContextId;
+    ModPath::from_segments((ra_ap_hir::PathKind::Crate),vec![Name::new(stringify!(application), SyntaxContext::from_u32(1)),],)
+}
+};
     let resolved = resolver.resolve_module_path_in_items(db, &app_mod_path);
     let application_module = match resolved.take_types().context("no application module")? {
         ra_ap_hir::ModuleDefId::ModuleId(module_id) => Module::from(module_id),
@@ -171,7 +178,7 @@ pub struct EntitySubset {
 fn analyze_use_case_mod(module: Module, db: &RootDatabase, bagua: &BaguaContext) -> Result<()> {
     let mod_file_id = module.as_source_file_id(db).context("no source file id")?;
     let sema = Semantics::new(db);
-    let mod_file = sema.parse(mod_file_id);
+    let mod_file = sema.parse(EditionedFileId::new(db, mod_file_id));
 
     let uc_impl = mod_file
         .syntax()
@@ -344,7 +351,7 @@ fn expand_macro_recur(
     sema: &Semantics<'_, RootDatabase>,
     macro_call: &ast::MacroCall,
 ) -> Option<SyntaxNode> {
-    let expanded = sema.expand(macro_call)?.clone_for_update();
+    let expanded = sema.expand_macro_call(macro_call)?.clone_for_update();
     expand(sema, expanded, ast::MacroCall::cast, expand_macro_recur)
 }
 
@@ -412,21 +419,21 @@ fn use_case_mods(module: Module, db: &RootDatabase) -> Result<Vec<Module>> {
 }
 
 pub fn bc_user_crate(host: &AnalysisHost) -> Result<Crate> {
-    let crate_graph = host.raw_database().crate_graph();
+    let crate_graph = host.raw_database().all_crates();
     let crate_id = crate_graph
-        .crates_in_topological_order()
+        // .crates_in_topological_order()
         .into_iter()
         .find_map(|x| {
-            let krate = &crate_graph[x];
-            if krate
-                .display_name
-                .as_ref()
-                .unwrap()
-                .crate_name()
-                .to_string()
-                == "bc_user"
-            {
-                return Some(x);
+            let krate = x;
+            match &krate.data(host.raw_database()).origin {
+                ra_ap_base_db::CrateOrigin::Rustc { name } => todo!(),
+                ra_ap_base_db::CrateOrigin::Local { repo, name } => {
+                    if name.as_ref().map(|n| n.as_str()) == Some("bc_user") {
+                        return          Some(krate)
+                    }
+                },
+                ra_ap_base_db::CrateOrigin::Library { repo, name } => todo!(),
+                ra_ap_base_db::CrateOrigin::Lang(lang_crate_origin) => todo!(),
             }
             None
         });

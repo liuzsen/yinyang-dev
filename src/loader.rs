@@ -1,12 +1,15 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use ra_ap_base_db::SourceDatabase;
-use ra_ap_hir::{db::HirDatabase, AdtId, Crate, Enum, Function, Impl, Module, Struct, Trait, Type};
-use ra_ap_hir_def::resolver::{HasResolver, Resolver};
-use ra_ap_ide::{CrateId, RootDatabase};
+use ra_ap_base_db::{EditionedFileId, RootQueryDb, SourceDatabase};
+use ra_ap_hir::{db::HirDatabase, Crate, Enum, Function, Impl, Module, Struct, Trait, Type};
+use ra_ap_hir_def::{
+    resolver::{HasResolver, Resolver},
+    AdtId,
+};
+use ra_ap_ide::RootDatabase;
 use ra_ap_load_cargo::LoadCargoConfig;
-use ra_ap_proc_macro_api::ProcMacroServer;
+use ra_ap_proc_macro_api::ProcMacroClient;
 use ra_ap_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, RustLibSource};
 use ra_ap_vfs::{AbsPathBuf, Vfs};
 
@@ -15,7 +18,7 @@ use crate::{abs_path, crate_path, parse_find::GetId, timer_end, timer_start, Sem
 pub struct BaguaProject {
     pub db: RootDatabase,
     pub vfs: Vfs,
-    pub proc_macro: ProcMacroServer,
+    pub proc_macro: ProcMacroClient,
 
     pub root_crate: Crate,
     pub bc_crates: Vec<BoundedContext>,
@@ -24,6 +27,7 @@ pub struct BaguaProject {
 }
 
 pub struct Bagua {
+    pub krate: Crate,
     pub entity_trait: EntityTrait,
     pub usecase_trait: Trait,
     pub repository_trait: RepositoryTrait,
@@ -83,8 +87,8 @@ impl BaguaProject {
                 error,
                 build_scripts,
                 rustc,
-                cargo_config_extra_env,
-                set_test,
+                // cargo_config_extra_env,
+                // set_test,
             } => {
                 let crates = cargo.packages().collect::<Vec<_>>();
                 crates.iter().find_map(|k| {
@@ -100,8 +104,8 @@ impl BaguaProject {
             ra_ap_project_model::ProjectWorkspaceKind::DetachedFile {
                 file,
                 cargo,
-                cargo_config_extra_env,
-                set_test,
+                // cargo_config_extra_env,
+                // set_test,
             } => todo!(),
         };
         let root_krate_name = root_krate_name.unwrap();
@@ -128,16 +132,17 @@ impl BaguaProject {
         println!("load workspace: {:?}", now.elapsed());
 
         let now = Instant::now();
-        let crate_graph = db.crate_graph();
+        let crate_graph = db.all_crates();
         let root_krate = crate_graph
-            .iter()
+            .into_iter()
             .find_map(|id| {
-                let krate = &crate_graph[id];
-                match &krate.origin {
+                let krate = id;
+                // let krate = &crate_graph[id];
+                match &krate.data(&db).origin {
                     ra_ap_base_db::CrateOrigin::Local { repo, name } => {
                         let name = name.as_ref().map(|n| n.as_str());
                         if name == Some(&root_krate_name) {
-                            Some(Crate::from(id))
+                            Some(Crate::from(krate.clone()))
                         } else {
                             None
                         }
@@ -148,18 +153,19 @@ impl BaguaProject {
             .unwrap();
         println!("root krate found: {:?}", now.elapsed());
         let bc_crates = db
-            .crate_graph()
+            .all_crates()
             .iter()
             .filter_map(|krate_id| {
-                let krate = &crate_graph[krate_id];
-                match &krate.origin {
+                let krate = krate_id.clone();
+                // let krate = &crate_graph[krate_id];
+                match &krate.data(&db).origin {
                     ra_ap_base_db::CrateOrigin::Local {
                         repo,
                         name: Some(name),
                     } => {
                         if name.as_str().starts_with("bc") {
                             Some(BoundedContext {
-                                krate: Crate::from(krate_id),
+                                krate: Crate::from(krate),
                             })
                         } else {
                             None
@@ -170,19 +176,32 @@ impl BaguaProject {
             })
             .collect::<Vec<_>>();
         let bagua_crate = db
-            .crate_graph()
+            .all_crates()
             .iter()
             .find_map(|krate_id| {
-                let krate = &crate_graph[krate_id];
-                if krate
-                    .display_name
-                    .as_ref()
-                    .map(|n| n.crate_name().symbol().as_str())
-                    == Some("bagua_dev")
-                {
-                    Some(Crate::from(krate_id))
-                } else {
-                    None
+                let krate = krate_id.clone();
+                // let krate = &crate_graph[krate_id];
+                let krate_data = krate.data(&db);
+                dbg!(&krate_data.origin);
+                match &krate_data.origin {
+                    ra_ap_base_db::CrateOrigin::Local { repo, name } => {
+                        if matches!(
+                            name.as_ref().map(|n| n.as_str()),
+                            Some("bagua_dev") | Some("bagua") | Some("bagua-dev")
+                        ) {
+                            Some(krate)
+                        } else {
+                            None
+                        }
+                    }
+                    ra_ap_base_db::CrateOrigin::Library { repo, name } => {
+                        if matches!(name.as_str(), "bagua_dev" | "bagua" | "bagua-dev") {
+                            Some(krate)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 }
             })
             .context("bagua crate not found")?;
@@ -201,6 +220,7 @@ impl BaguaProject {
             root_crate: root_krate,
             bc_crates,
             bagua: Bagua {
+                krate: Crate::from(bagua_crate),
                 entity_trait: EntityTrait(entity_trait),
                 usecase_trait: uc_trait,
                 repository_trait: RepositoryTrait(repository_trait),
@@ -365,7 +385,7 @@ impl Usecase {
     pub fn debug_print(&self, db: &RootDatabase) {
         let sema = Semantics::new(db);
         let source = self.module.as_source_file_id(db).unwrap();
-        let file = sema.parse(source);
+        let file = sema.parse(EditionedFileId::new(db, source));
         dbg!(&file);
     }
 }

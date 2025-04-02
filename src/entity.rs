@@ -29,13 +29,6 @@ pub struct NamedRefPath {
     segments: Vec<Arc<FieldName>>,
 }
 
-// #[derive(Debug, Clone, PartialEq, Hash, Eq)]
-// pub struct NamedRefPathBorrow<'a> {
-//     segments: &'a [FieldName],
-// }
-// use std::path::Path;
-// use std::path::PathBuf;
-
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct FieldName(pub String);
 
